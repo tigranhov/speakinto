@@ -11,6 +11,7 @@
 #include "transcriber.h"
 #include "text_injector.h"
 #include "model_manager.h"
+#include "overlay.h"
 
 // App state
 enum class AppState { Idle, Recording, Transcribing };
@@ -82,6 +83,7 @@ static void onComboDown() {
     g_state = AppState::Recording;
     g_recordStartTime = std::chrono::steady_clock::now();
     tray::setState(tray::State::Recording);
+    overlay::setState(overlay::State::Recording);
     log("Recording started");
 }
 
@@ -97,6 +99,7 @@ static void onComboUp() {
         log("Recording discarded (%lldms < %dms)", duration, MIN_RECORDING_MS);
         g_state = AppState::Idle;
         tray::setState(tray::State::Idle);
+    overlay::setState(overlay::State::Idle);
         return;
     }
 
@@ -107,11 +110,13 @@ static void onComboUp() {
         log("No audio data captured");
         g_state = AppState::Idle;
         tray::setState(tray::State::Idle);
+    overlay::setState(overlay::State::Idle);
         return;
     }
 
     g_state = AppState::Transcribing;
     tray::setState(tray::State::Transcribing);
+    overlay::setState(overlay::State::Transcribing);
 
     // Run transcription on background thread
     HWND hwnd = g_hwnd;
@@ -160,6 +165,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_TRANSCRIPTION_DONE:
             g_state = AppState::Idle;
             tray::setState(tray::State::Idle);
+    overlay::setState(overlay::State::Idle);
             return 0;
 
         case tray::WM_TRAY_ICON:
@@ -213,6 +219,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     refreshDevices();
 
     tray::create(g_hwnd);
+    overlay::create(hInstance);
 
     // Check and download model if needed
     if (!model::modelExists()) {
@@ -248,6 +255,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
 
     // Cleanup
     keyboard::stop();
+    overlay::destroy();
     tray::destroy();
     audio::cleanup();
     CoUninitialize();

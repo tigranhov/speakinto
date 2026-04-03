@@ -11,6 +11,7 @@ add_executable(wisper-agent WIN32
   src/text_injector.cpp
   src/wav_writer.cpp
   src/tray.cpp
+  src/overlay.cpp
   src/model_manager.cpp
 )
 
