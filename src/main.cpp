@@ -10,6 +10,7 @@
 #include "wav_writer.h"
 #include "transcriber.h"
 #include "text_injector.h"
+#include "model_manager.h"
 
 // App state
 enum class AppState { Idle, Recording, Transcribing };
@@ -57,11 +58,8 @@ static void findWhisperPaths() {
     // In dev: build/Release/wisper-agent.exe → ../../bin/Release/whisper-cli.exe
     g_whisperExe = dir + L"..\\..\\bin\\Release\\whisper-cli.exe";
 
-    // Model path in %APPDATA%
-    wchar_t appdata[MAX_PATH];
-    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appdata))) {
-        g_modelPath = std::wstring(appdata) + L"\\wisper-agent\\models\\ggml-base.bin";
-    }
+    // Model path from model manager
+    g_modelPath = model::getModelPath();
 
     log("Whisper exe: %ls", g_whisperExe.c_str());
     log("Model path: %ls", g_modelPath.c_str());
@@ -215,6 +213,28 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     refreshDevices();
 
     tray::create(g_hwnd);
+
+    // Check and download model if needed
+    if (!model::modelExists()) {
+        log("Model not found, downloading...");
+        tray::showBalloon(L"Wisper Agent", L"Downloading speech model (~150MB)...");
+        bool downloaded = model::downloadModel([](int percent) {
+            if (percent % 10 == 0) {
+                char buf[64];
+                snprintf(buf, sizeof(buf), "Model download: %d%%", percent);
+                OutputDebugStringA(buf);
+                OutputDebugStringA("\n");
+                fprintf(stderr, "%s\n", buf);
+            }
+        });
+        if (downloaded) {
+            tray::showBalloon(L"Wisper Agent", L"Model downloaded successfully.");
+            g_modelPath = model::getModelPath();
+        } else {
+            tray::showBalloon(L"Wisper Agent", L"Failed to download model. Transcription won't work.");
+        }
+    }
+
     keyboard::start(g_hwnd);
 
     log("Wisper Agent is running. Hold Ctrl+Win to record.");

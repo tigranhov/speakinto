@@ -11,6 +11,7 @@ add_executable(wisper-agent WIN32
   src/text_injector.cpp
   src/wav_writer.cpp
   src/tray.cpp
+  src/model_manager.cpp
 )
 
 target_link_libraries(wisper-agent PRIVATE
@@ -19,6 +20,7 @@ target_link_libraries(wisper-agent PRIVATE
   user32
   shell32
   gdi32
+  winhttp
 )
 
 target_compile_definitions(wisper-agent PRIVATE
