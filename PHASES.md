@@ -1,26 +1,29 @@
 # Wisper Agent — Development Phases
 
-## Phase 1: Core MVP (Windows)
-**Goal:** Electron tray app with global hotkey → record → cloud STT → paste into active window.
+## Phase 1: Core MVP (Windows) — LOCAL ONLY, PUSH-TO-TALK
+**Goal:** Electron tray app running as background service. Hold keybind → record → local STT via whisper.cpp → paste into active window.
 
-- [ ] Initialize Electron + TypeScript project
-- [ ] System tray app with start/quit controls
-- [ ] Global hotkey registration (configurable, default `Ctrl+Alt+Space`)
-- [ ] Microphone audio capture (start/stop on hotkey toggle)
-- [ ] OpenAI Whisper API integration for transcription
-- [ ] Text injection into active window via clipboard (save → paste → restore)
-- [ ] Visual recording indicator (small overlay or tray icon change)
-- [ ] Basic error handling (no mic, API key missing, network error)
-- [ ] `.env` config for API key
+- [x] Initialize Electron + TypeScript project
+- [x] System tray app with start/quit controls + auto-start on login
+- [x] Push-to-talk keyboard hook via uiohook-napi (hold to record, release to stop)
+- [x] Configurable keybind (default Ctrl+Alt+Space), min 500ms recording duration
+- [x] Raw PCM audio capture via AudioWorklet (16kHz mono)
+- [x] whisper.cpp sidecar binary for local transcription (pluggable Transcriber interface)
+- [x] Model manager (auto-download ggml-base.bin from HuggingFace, checksum verification)
+- [x] WAV encoding (Float32 PCM → 16-bit PCM WAV)
+- [x] Text injection via clipboard (save → paste via uiohook keyTap → restore)
+- [x] Tray icon states (idle/recording/transcribing) + balloon notifications for errors
+- [x] Temp file cleanup on startup
+- [ ] End-to-end testing + packaging with electron-builder
 
-**Deliverable:** Installable Windows app that transcribes speech and types it anywhere.
+**Deliverable:** Installable Windows app that transcribes speech locally and types it anywhere.
 
 ---
 
 ## Phase 2: Real-Time Streaming & Overlay UI
 **Goal:** Live transcription feedback as the user speaks.
 
-- [ ] Streaming STT integration (Deepgram or Azure Speech)
+- [ ] Streaming local STT (chunked whisper.cpp or alternative)
 - [ ] Floating overlay window showing partial transcription in real-time
 - [ ] Voice Activity Detection (VAD) to auto-stop on silence
 - [ ] Audio level meter / waveform visualization in overlay
@@ -31,27 +34,26 @@
 
 ---
 
-## Phase 3: Local/Offline STT
-**Goal:** No internet required, no API costs.
+## Phase 3: STT Engine Improvements
+**Goal:** Better accuracy and performance.
 
-- [ ] Bundle `whisper.cpp` as native addon or sidecar binary
-- [ ] Model download manager (tiny, base, small, medium)
-- [ ] Toggle between cloud and local STT in settings
+- [ ] Support multiple whisper models (tiny, base, small, medium)
 - [ ] GPU acceleration support (CUDA on Windows)
+- [ ] Alternative transcriber implementations (WhisperX, faster-whisper via PyInstaller sidecar)
 - [ ] Performance benchmarking and optimization
-- [ ] Graceful fallback: local → cloud if local fails
+- [ ] Language selection for transcription
 
-**Deliverable:** Fully offline voice-to-text with no API dependency.
+**Deliverable:** Faster, more accurate transcription with model choice.
 
 ---
 
 ## Phase 4: macOS Port
 **Goal:** Feature parity on macOS.
 
-- [ ] macOS text injection via `CGEventPost` / AppleScript
+- [ ] macOS text injection via CGEventPost / AppleScript
 - [ ] Accessibility permission request flow
 - [ ] Microphone permission handling (macOS-specific)
-- [ ] macOS global hotkey (e.g., `Cmd+Option+Space`)
+- [ ] macOS global hotkey (e.g., Cmd+Option+Space)
 - [ ] macOS code signing and notarization
 - [ ] Platform-specific installer (DMG)
 
@@ -62,10 +64,8 @@
 ## Phase 5: Settings & Polish
 **Goal:** User-friendly configuration and quality-of-life features.
 
-- [ ] Settings window (hotkey, STT engine, language, model size)
-- [ ] Language selection for transcription
-- [ ] Hotkey customization UI
-- [ ] Auto-start on login
+- [ ] Settings window (keybind, STT engine, language, model size)
+- [ ] Keybind customization UI (with Win key warning)
 - [ ] Update mechanism (electron-updater)
 - [ ] Usage statistics (local only — transcription count, time saved)
 - [ ] Onboarding wizard (first-run setup)

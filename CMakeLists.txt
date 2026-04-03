@@ -1,0 +1,29 @@
+cmake_minimum_required(VERSION 3.20)
+project(wisper-agent LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+add_executable(wisper-agent WIN32
+  src/main.cpp
+  src/keyboard_hook.cpp
+  src/audio_capture.cpp
+  src/transcriber.cpp
+  src/text_injector.cpp
+  src/wav_writer.cpp
+  src/tray.cpp
+)
+
+target_link_libraries(wisper-agent PRIVATE
+  ole32
+  uuid
+  user32
+  shell32
+  gdi32
+)
+
+target_compile_definitions(wisper-agent PRIVATE
+  UNICODE
+  _UNICODE
+  WIN32_LEAN_AND_MEAN
+  NOMINMAX
+)
