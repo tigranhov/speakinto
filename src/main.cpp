@@ -223,6 +223,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         case tray::WM_TRAY_ICON:
             if (lParam == WM_RBUTTONUP) {
+                refreshDevices();
                 tray::showContextMenu(hwnd, g_devices, g_selectedDeviceIndex);
             }
             return 0;
