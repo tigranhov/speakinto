@@ -13,6 +13,7 @@
 #include "model_manager.h"
 #include "overlay.h"
 #include "settings.h"
+#include "processor.h"
 
 // App state
 enum class AppState { Initializing, Idle, Recording, Transcribing };
@@ -31,11 +32,15 @@ static settings::RepeatPressMode g_repeatMode = settings::RepeatPressMode::Queue
 static model::ModelSize g_modelSize = model::ModelSize::Small;
 static bool g_downloading = false;
 
+// Processor
+static bool g_processorEnabled = false;
+
 // Custom messages for async operations
 constexpr UINT WM_TRANSCRIPTION_DONE = WM_APP + 20;
 constexpr UINT WM_GPU_FALLBACK = WM_APP + 21;
 constexpr UINT WM_MODEL_READY = WM_APP + 22;
 constexpr UINT WM_MODEL_PROGRESS = WM_APP + 23;
+constexpr UINT WM_PROCESSOR_READY = WM_APP + 24;
 
 // Paths
 static std::wstring g_whisperExeGpu;  // CUDA path, empty if not found
@@ -104,6 +109,7 @@ static void saveCurrentSettings() {
     cfg.repeatPressMode = g_repeatMode;
     cfg.selectedMicIndex = g_selectedDeviceIndex;
     cfg.modelSize = g_modelSize;
+    cfg.processorEnabled = g_processorEnabled;
     settings::save(cfg);
 }
 
@@ -224,8 +230,48 @@ static void onComboUp() {
 
         log("Transcribed: %s", txResult.text.c_str());
 
-        // Inject text (must happen on this thread since SendInput is thread-agnostic)
-        injector::injectText(txResult.text);
+        // Run processor if enabled
+        std::string finalText = txResult.text;
+        bool processorRan = false;
+        if (g_processorEnabled && processor::isReady()) {
+            auto refined = processor::process(txResult.text);
+            processorRan = true;
+            log("Processor returned: %s", refined.c_str());
+            if (!refined.empty() && refined != txResult.text) {
+                finalText = refined;
+            }
+        }
+
+        // Write comparison log to %APPDATA%\wisper-agent\transcription.log
+        {
+            wchar_t appdata[MAX_PATH];
+            if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appdata))) {
+                std::wstring logPath = std::wstring(appdata) + L"\\wisper-agent\\transcription.log";
+                FILE* f = _wfopen(logPath.c_str(), L"a");
+                if (f) {
+                    SYSTEMTIME st;
+                    GetLocalTime(&st);
+                    // Escape newlines in text so each log field stays on one line
+                    auto escape = [](const std::string& s) {
+                        std::string r;
+                        for (char c : s) {
+                            if (c == '\n') r += "\\n";
+                            else if (c == '\r') continue;
+                            else r += c;
+                        }
+                        return r;
+                    };
+                    fprintf(f, "[%04d-%02d-%02d %02d:%02d:%02d] | %s | %s | %s\n",
+                        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
+                        escape(txResult.text).c_str(),
+                        escape(finalText).c_str(),
+                        processorRan ? "LLM" : "raw");
+                    fclose(f);
+                }
+            }
+        }
+
+        injector::injectText(finalText);
 
         // Return to Idle immediately so user can record again
         PostMessage(hwnd, WM_TRANSCRIPTION_DONE, 0, 0);
@@ -248,6 +294,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_GPU_FALLBACK:
             g_usingGpu = false;
             log("Switched to CPU backend permanently");
+            return 0;
+
+        case WM_PROCESSOR_READY:
+            g_downloading = false;
+            overlay::setState(overlay::State::Idle);
+            tray::setState(tray::State::Idle);
+            settings::notifyProcessorDownloadComplete(lParam != 0);
+            if (lParam) {
+                tray::showBalloon(L"Wisper Agent", L"AI refinement ready.");
+                if (g_processorEnabled && processor::isReady()) {
+                    processor::start();
+                    log("AI processor started after download");
+                }
+            } else {
+                tray::showBalloon(L"Wisper Agent", L"Failed to download AI model.");
+            }
             return 0;
 
         case WM_MODEL_PROGRESS:
@@ -284,6 +346,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 }
                 log("Model ready: %s", model::modelSizeName(g_modelSize));
             }
+            // If processor was enabled during model download, start its download now
+            if (g_processorEnabled && !processor::isReady() && !g_downloading) {
+                g_downloading = true;
+                tray::setState(tray::State::Downloading);
+                overlay::setState(overlay::State::Downloading, 0);
+                std::thread([hwndMsg = g_hwnd]() {
+                    bool ok = processor::ensureDependencies([hwndMsg](int percent) {
+                        PostMessage(hwndMsg, WM_MODEL_PROGRESS, percent, 0);
+                    });
+                    PostMessage(hwndMsg, WM_PROCESSOR_READY, 0, ok ? 1 : 0);
+                }).detach();
+            }
             return 0;
         }
 
@@ -313,10 +387,29 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 cfg.repeatPressMode = g_repeatMode;
                 cfg.selectedMicIndex = g_selectedDeviceIndex;
                 cfg.modelSize = g_modelSize;
+                cfg.processorEnabled = g_processorEnabled;
                 const wchar_t* backendInfo = g_usingGpu
                     ? L"Transcription backend: CUDA (GPU)"
                     : L"Transcription backend: CPU";
-                if (settings::showSettingsDialog(g_hInstance, cfg, backendInfo)) {
+                settings::ProcessorCallbacks procCb;
+                procCb.isReady = []() { return processor::isReady(); };
+                procCb.requestDownload = [hwndMsg = g_hwnd]() {
+                    if (g_downloading) return;
+                    g_downloading = true;
+                    tray::setState(tray::State::Downloading);
+                    overlay::setState(overlay::State::Downloading, 0);
+                    std::thread([hwndMsg]() {
+                        bool ok = processor::ensureDependencies([hwndMsg](int percent) {
+                            PostMessage(hwndMsg, WM_MODEL_PROGRESS, percent, 0);
+                        });
+                        PostMessage(hwndMsg, WM_PROCESSOR_READY, 0, ok ? 1 : 0);
+                    }).detach();
+                };
+                procCb.requestRemove = []() {
+                    processor::removeDependencies();
+                };
+
+                if (settings::showSettingsDialog(g_hInstance, cfg, backendInfo, procCb)) {
                     g_repeatMode = cfg.repeatPressMode;
                     g_selectedDeviceIndex = cfg.selectedMicIndex;
 
@@ -343,6 +436,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                                     PostMessage(hwndMsg, WM_MODEL_READY, (WPARAM)oldSize, ok ? 1 : 0);
                                 }).detach();
                             }
+                        }
+                    }
+
+                    // Handle processor toggle — deps already managed via button
+                    if (cfg.processorEnabled != g_processorEnabled) {
+                        g_processorEnabled = cfg.processorEnabled;
+                        if (g_processorEnabled && processor::isReady()) {
+                            processor::start();
+                        } else if (!g_processorEnabled) {
+                            processor::stop();
                         }
                     }
 
@@ -396,6 +499,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     g_selectedDeviceIndex = cfg.selectedMicIndex;
     g_repeatMode = cfg.repeatPressMode;
     g_modelSize = cfg.modelSize;
+    g_processorEnabled = cfg.processorEnabled;
 
     tray::create(g_hwnd);
     overlay::create(hInstance);
@@ -425,6 +529,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
         tray::showBalloon(L"Wisper Agent", L"Ready \u2014 press Ctrl+` to dictate");
     }
 
+    // Start processor if enabled and ready
+    if (g_processorEnabled && processor::isReady()) {
+        processor::start();
+        log("AI processor started");
+    }
+
     log("Wisper Agent is running. Hold Ctrl+` to record.");
 
     // Message loop
@@ -435,6 +545,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     }
 
     // Cleanup
+    processor::stop();
     keyboard::stop();
     overlay::destroy();
     tray::destroy();

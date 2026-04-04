@@ -2,6 +2,7 @@
 #include <shlobj.h>
 #include <fstream>
 #include <string>
+#include <vector>
 
 namespace settings {
 
@@ -99,6 +100,9 @@ Settings load() {
         s.modelSize = model::ModelSize::Base;
     }
 
+    auto procStr = findValue(json, "processorEnabled");
+    if (procStr == "true") s.processorEnabled = true;
+
     return s;
 }
 
@@ -117,7 +121,8 @@ void save(const Settings& s) {
     file << "{\n";
     file << "  \"repeatPressMode\": \"" << modeToString(s.repeatPressMode) << "\",\n";
     file << "  \"selectedMicIndex\": " << s.selectedMicIndex << ",\n";
-    file << "  \"modelSize\": \"" << model::modelSizeString(s.modelSize) << "\"\n";
+    file << "  \"modelSize\": \"" << model::modelSizeString(s.modelSize) << "\",\n";
+    file << "  \"processorEnabled\": " << (s.processorEnabled ? "true" : "false") << "\n";
     file << "}\n";
     file.close();
 
@@ -141,9 +146,140 @@ static constexpr int ID_RADIO_TINY   = 201;
 static constexpr int ID_RADIO_BASE   = 202;
 static constexpr int ID_RADIO_SMALL  = 203;
 static constexpr int ID_RADIO_MEDIUM = 204;
+// Control IDs — processor
+static constexpr int ID_CHECK_PROCESSOR = 301;
+static constexpr int ID_BTN_PROCESSOR   = 302;
+static constexpr int ID_BTN_SHOW_LOG    = 303;
 // Buttons
 static constexpr int ID_OK           = IDOK;
 static constexpr int ID_CANCEL       = IDCANCEL;
+
+// --- Log viewer ---
+
+static const wchar_t* LOG_VIEWER_CLASS = L"WisperLogViewerClass";
+static HFONT g_logFont = nullptr;
+
+static LRESULT CALLBACK LogViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (msg == WM_DESTROY) {
+        if (g_logFont) { DeleteObject(g_logFont); g_logFont = nullptr; }
+        return 0;
+    }
+    if (msg == WM_CLOSE) {
+        DestroyWindow(hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static void showLogViewer(HINSTANCE hInstance) {
+    wchar_t appdata[MAX_PATH];
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appdata))) return;
+    std::wstring logPath = std::wstring(appdata) + L"\\wisper-agent\\transcription.log";
+
+    std::ifstream file(logPath);
+    if (!file.is_open()) return;
+
+    // Read lines — format: [timestamp] | raw | refined | mode
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(file, line)) {
+        if (!line.empty()) lines.push_back(line);
+    }
+    file.close();
+
+    // Keep last 50
+    size_t start = lines.size() > 50 ? lines.size() - 50 : 0;
+
+    // Build formatted display
+    std::string display;
+    for (size_t i = start; i < lines.size(); i++) {
+        auto& l = lines[i];
+        // Parse: [timestamp] | raw | refined | mode
+        auto p1 = l.find(" | ");
+        if (p1 == std::string::npos) { display += l + "\r\n"; continue; }
+        auto p2 = l.find(" | ", p1 + 3);
+        if (p2 == std::string::npos) { display += l + "\r\n"; continue; }
+        auto p3 = l.find(" | ", p2 + 3);
+
+        std::string timestamp = l.substr(0, p1);
+        std::string raw = l.substr(p1 + 3, p2 - p1 - 3);
+        std::string refined = l.substr(p2 + 3, p3 != std::string::npos ? p3 - p2 - 3 : std::string::npos);
+        std::string mode = p3 != std::string::npos ? l.substr(p3 + 3) : "";
+
+        // Unescape \\n back to newlines for display
+        auto unescape = [](const std::string& s) {
+            std::string r;
+            for (size_t j = 0; j < s.size(); j++) {
+                if (s[j] == '\\' && j + 1 < s.size() && s[j+1] == 'n') {
+                    r += "\r\n          ";
+                    j++;
+                } else {
+                    r += s[j];
+                }
+            }
+            return r;
+        };
+
+        display += timestamp + "  [" + mode + "]\r\n";
+        display += "  Raw:     " + unescape(raw) + "\r\n";
+        if (raw != refined) {
+            display += "  Refined: " + unescape(refined) + "\r\n";
+        } else {
+            display += "  Refined: (unchanged)\r\n";
+        }
+        display += "\r\n";
+    }
+
+    if (display.empty()) display = "No transcription entries yet.";
+
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, display.c_str(), -1, nullptr, 0);
+    std::vector<wchar_t> wtext(wlen);
+    MultiByteToWideChar(CP_UTF8, 0, display.c_str(), -1, wtext.data(), wlen);
+
+    // Register log viewer class (separate from settings to avoid message conflicts)
+    WNDCLASSEXW lwc = {};
+    lwc.cbSize = sizeof(lwc);
+    lwc.lpfnWndProc = LogViewerWndProc;
+    lwc.hInstance = hInstance;
+    lwc.lpszClassName = LOG_VIEWER_CLASS;
+    lwc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    lwc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    RegisterClassExW(&lwc);
+
+    HWND hLog = CreateWindowExW(
+        WS_EX_TOPMOST,
+        LOG_VIEWER_CLASS,
+        L"Processing Log (last 50 entries)",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_SIZEBOX,
+        CW_USEDEFAULT, CW_USEDEFAULT, 700, 500,
+        nullptr, nullptr, hInstance, nullptr
+    );
+    if (!hLog) return;
+
+    if (g_logFont) DeleteObject(g_logFont);
+    g_logFont = CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
+
+    HWND hEdit = CreateWindowExW(0, L"EDIT", wtext.data(),
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL |
+        ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_AUTOHSCROLL,
+        0, 0, 684, 462,
+        hLog, nullptr, hInstance, nullptr);
+    SendMessageW(hEdit, WM_SETFONT, (WPARAM)g_logFont, TRUE);
+
+    // Scroll to bottom
+    SendMessageW(hEdit, EM_SETSEL, (WPARAM)display.size(), (LPARAM)display.size());
+    SendMessageW(hEdit, EM_SCROLLCARET, 0, 0);
+
+    ShowWindow(hLog, SW_SHOW);
+    SetForegroundWindow(hLog);
+}
+
+// Processor state for dialog
+static ProcessorCallbacks g_processorCb;
+static HWND g_hProcCheck = nullptr;
+static HWND g_hProcBtn = nullptr;
 
 static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
@@ -168,11 +304,31 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 else
                     g_dlgSettings->modelSize = model::ModelSize::Small;
 
+                // Read processor checkbox
+                g_dlgSettings->processorEnabled =
+                    SendDlgItemMessageW(hwnd, ID_CHECK_PROCESSOR, BM_GETCHECK, 0, 0) == BST_CHECKED;
+
                 g_dlgResult = true;
                 DestroyWindow(hwnd);
             } else if (id == ID_CANCEL) {
                 g_dlgResult = false;
                 DestroyWindow(hwnd);
+            } else if (id == ID_BTN_SHOW_LOG) {
+                showLogViewer(g_processorCb.isReady ? (HINSTANCE)GetWindowLongPtrW(hwnd, GWLP_HINSTANCE) : nullptr);
+            } else if (id == ID_BTN_PROCESSOR) {
+                if (g_processorCb.isReady && g_processorCb.isReady()) {
+                    // Remove dependencies
+                    if (g_processorCb.requestRemove) g_processorCb.requestRemove();
+                    // Uncheck and disable the checkbox
+                    SendMessageW(g_hProcCheck, BM_SETCHECK, BST_UNCHECKED, 0);
+                    EnableWindow(g_hProcCheck, FALSE);
+                    SetWindowTextW(g_hProcBtn, L"Download");
+                } else {
+                    // Download dependencies (async — dialog stays open)
+                    if (g_processorCb.requestDownload) g_processorCb.requestDownload();
+                    EnableWindow(g_hProcBtn, FALSE);
+                    SetWindowTextW(g_hProcBtn, L"Downloading...");
+                }
             }
             return 0;
         }
@@ -191,7 +347,21 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-bool showSettingsDialog(HINSTANCE hInstance, Settings& s, const wchar_t* backendInfo) {
+void notifyProcessorDownloadComplete(bool success) {
+    if (g_hProcBtn) {
+        EnableWindow(g_hProcBtn, TRUE);
+        if (success) {
+            SetWindowTextW(g_hProcBtn, L"Remove");
+            if (g_hProcCheck) EnableWindow(g_hProcCheck, TRUE);
+        } else {
+            SetWindowTextW(g_hProcBtn, L"Download");
+        }
+    }
+}
+
+bool showSettingsDialog(HINSTANCE hInstance, Settings& s, const wchar_t* backendInfo,
+                        ProcessorCallbacks processorCb) {
+    g_processorCb = processorCb;
     WNDCLASSEXW wc = {};
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = SettingsWndProc;
@@ -204,7 +374,7 @@ bool showSettingsDialog(HINSTANCE hInstance, Settings& s, const wchar_t* backend
     g_dlgSettings = &s;
     g_dlgResult = false;
 
-    int dlgW = 340, dlgH = 400;
+    int dlgW = 340, dlgH = 500;
     int screenW = GetSystemMetrics(SM_CXSCREEN);
     int screenH = GetSystemMetrics(SM_CYSCREEN);
     int x = (screenW - dlgW) / 2;
@@ -299,23 +469,58 @@ bool showSettingsDialog(HINSTANCE hInstance, Settings& s, const wchar_t* backend
             SendMessageW(hSmall, BM_SETCHECK, BST_CHECKED, 0); break;
     }
 
+    // --- AI Processing group ---
+    bool procReady = g_processorCb.isReady && g_processorCb.isReady();
+
+    HWND hGroup3 = CreateWindowExW(0, L"BUTTON", L"AI Text Processing:",
+        WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+        10, 300, 310, 80,
+        g_dlgHwnd, nullptr, hInstance, nullptr);
+    SendMessageW(hGroup3, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+    g_hProcCheck = CreateWindowExW(0, L"BUTTON",
+        L"Enable (~1GB download)",
+        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        25, 322, 170, 22,
+        g_dlgHwnd, (HMENU)(INT_PTR)ID_CHECK_PROCESSOR, hInstance, nullptr);
+    SendMessageW(g_hProcCheck, WM_SETFONT, (WPARAM)hFont, TRUE);
+    if (s.processorEnabled && procReady) {
+        SendMessageW(g_hProcCheck, BM_SETCHECK, BST_CHECKED, 0);
+    }
+    if (!procReady) {
+        EnableWindow(g_hProcCheck, FALSE);
+    }
+
+    g_hProcBtn = CreateWindowExW(0, L"BUTTON",
+        procReady ? L"Remove" : L"Download",
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        220, 320, 90, 26,
+        g_dlgHwnd, (HMENU)(INT_PTR)ID_BTN_PROCESSOR, hInstance, nullptr);
+    SendMessageW(g_hProcBtn, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+    HWND hLogBtn = CreateWindowExW(0, L"BUTTON", L"Show Log",
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        25, 350, 90, 24,
+        g_dlgHwnd, (HMENU)(INT_PTR)ID_BTN_SHOW_LOG, hInstance, nullptr);
+    SendMessageW(hLogBtn, WM_SETFONT, (WPARAM)hFont, TRUE);
+
     // Backend info line
     HWND hInfo = CreateWindowExW(0, L"STATIC", backendInfo,
         WS_CHILD | WS_VISIBLE,
-        10, 298, 310, 18,
+        10, 390, 310, 18,
         g_dlgHwnd, nullptr, hInstance, nullptr);
     SendMessageW(hInfo, WM_SETFONT, (WPARAM)hFont, TRUE);
 
     // OK / Cancel buttons
     HWND hOk = CreateWindowExW(0, L"BUTTON", L"OK",
         WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-        150, 325, 80, 28,
+        150, 420, 80, 28,
         g_dlgHwnd, (HMENU)(INT_PTR)ID_OK, hInstance, nullptr);
     SendMessageW(hOk, WM_SETFONT, (WPARAM)hFont, TRUE);
 
     HWND hCancelBtn = CreateWindowExW(0, L"BUTTON", L"Cancel",
         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-        240, 325, 80, 28,
+        240, 420, 80, 28,
         g_dlgHwnd, (HMENU)(INT_PTR)ID_CANCEL, hInstance, nullptr);
     SendMessageW(hCancelBtn, WM_SETFONT, (WPARAM)hFont, TRUE);
 

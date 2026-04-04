@@ -1,6 +1,7 @@
 #pragma once
 #include <windows.h>
 #include <string>
+#include <functional>
 #include "model_manager.h"
 
 namespace settings {
@@ -11,12 +12,25 @@ struct Settings {
     RepeatPressMode repeatPressMode = RepeatPressMode::Queue;
     int selectedMicIndex = -1;
     model::ModelSize modelSize = model::ModelSize::Small;
+    bool processorEnabled = false;
+};
+
+// Callbacks for processor dependency management (provided by main.cpp)
+struct ProcessorCallbacks {
+    std::function<bool()> isReady;                // check if deps exist
+    std::function<void()> requestDownload;        // trigger async download
+    std::function<void()> requestRemove;          // delete deps
 };
 
 Settings load();
 void save(const Settings& s);
 bool isDialogOpen();
 
-bool showSettingsDialog(HINSTANCE hInstance, Settings& s, const wchar_t* backendInfo = L"");
+// Called from main.cpp when async processor download completes
+void notifyProcessorDownloadComplete(bool success);
+
+bool showSettingsDialog(HINSTANCE hInstance, Settings& s,
+                        const wchar_t* backendInfo = L"",
+                        ProcessorCallbacks processorCb = {});
 
 }
