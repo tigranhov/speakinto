@@ -19,9 +19,9 @@ Build, package, and publish a new release of Wisper Agent to GitHub.
    - `major`: breaking changes or full rewrites
 4. Confirm the new version with the user before proceeding
 
-## Step 2: Update version in installer
+## Step 2: Update version in installers
 
-Update `AppVersion` in `installer.iss` to match the new version (without the `v` prefix).
+Update `AppVersion` in **both** `installer-universal.iss` and `installer-nvidia.iss` to match the new version (without the `v` prefix).
 
 ## Step 3: Build
 
@@ -33,33 +33,54 @@ cmake --build build --config Release
 
 Verify the build succeeds with no errors.
 
-## Step 4: Package ZIP
+## Step 4: Package ZIPs
 
+**Universal ZIP (CPU only):**
 ```
-rm -rf release/wisper-agent
-mkdir -p release/wisper-agent/assets/icons
-cp build/Release/wisper-agent.exe release/wisper-agent/
-cp bin/Release/whisper-cli.exe release/wisper-agent/
-cp bin/Release/whisper.dll release/wisper-agent/
-cp bin/Release/ggml.dll release/wisper-agent/
-cp bin/Release/ggml-cpu.dll release/wisper-agent/
-cp bin/Release/ggml-base.dll release/wisper-agent/
-cp assets/icons/*.ico release/wisper-agent/assets/icons/
-```
-
-Create ZIP using PowerShell:
-```
-cd release
-powershell -Command "Compress-Archive -Path 'wisper-agent' -DestinationPath 'wisper-agent-win64.zip' -Force"
+rm -rf release/wisper-agent-universal
+mkdir -p release/wisper-agent-universal/assets/icons
+cp build/Release/wisper-agent.exe release/wisper-agent-universal/
+cp bin/Release/whisper-cli.exe release/wisper-agent-universal/
+cp bin/Release/whisper.dll release/wisper-agent-universal/
+cp bin/Release/ggml.dll release/wisper-agent-universal/
+cp bin/Release/ggml-cpu.dll release/wisper-agent-universal/
+cp bin/Release/ggml-base.dll release/wisper-agent-universal/
+cp assets/icons/*.ico release/wisper-agent-universal/assets/icons/
+cd release && powershell -Command "Compress-Archive -Path 'wisper-agent-universal' -DestinationPath 'wisper-agent-universal-win64.zip' -Force"
 ```
 
-## Step 5: Build installer
+**NVIDIA ZIP (CUDA + CPU fallback):**
+```
+rm -rf release/wisper-agent-nvidia
+mkdir -p release/wisper-agent-nvidia/assets/icons
+cp build/Release/wisper-agent.exe release/wisper-agent-nvidia/
+# CPU fallback
+cp bin/Release/whisper-cli.exe release/wisper-agent-nvidia/
+cp bin/Release/whisper.dll release/wisper-agent-nvidia/
+cp bin/Release/ggml.dll release/wisper-agent-nvidia/
+cp bin/Release/ggml-cpu.dll release/wisper-agent-nvidia/
+cp bin/Release/ggml-base.dll release/wisper-agent-nvidia/
+# CUDA (rename to whisper-cli-cuda.exe so app detects it)
+cp bin/cuda/whisper-cli.exe release/wisper-agent-nvidia/whisper-cli-cuda.exe
+cp bin/cuda/ggml-cuda.dll release/wisper-agent-nvidia/
+cp bin/cuda/cublas64_12.dll release/wisper-agent-nvidia/
+cp bin/cuda/cublasLt64_12.dll release/wisper-agent-nvidia/
+cp bin/cuda/cudart64_12.dll release/wisper-agent-nvidia/
+# Icons
+cp assets/icons/*.ico release/wisper-agent-nvidia/assets/icons/
+cd release && powershell -Command "Compress-Archive -Path 'wisper-agent-nvidia' -DestinationPath 'wisper-agent-nvidia-win64.zip' -Force"
+```
+
+## Step 5: Build installers
 
 ```
-"$LOCALAPPDATA/Programs/Inno Setup 6/ISCC.exe" installer.iss
+"$LOCALAPPDATA/Programs/Inno Setup 6/ISCC.exe" installer-universal.iss
+"$LOCALAPPDATA/Programs/Inno Setup 6/ISCC.exe" installer-nvidia.iss
 ```
 
-This produces `release/wisper-agent-setup-win64.exe`.
+This produces:
+- `release/wisper-agent-setup-universal-win64.exe`
+- `release/wisper-agent-nvidia-setup-win64.exe`
 
 ## Step 6: Generate changelog
 
@@ -74,17 +95,19 @@ This produces `release/wisper-agent-setup-win64.exe`.
 
 ## Step 7: Commit, push, and publish
 
-1. If `installer.iss` was modified (version bump), commit it:
+1. If installer files were modified (version bump), commit them:
    ```
-   git add installer.iss
+   git add installer-universal.iss installer-nvidia.iss
    git commit -m "Bump version to vX.Y.Z"
    ```
 2. Push to origin: `git push origin main`
 3. Create the GitHub release:
    ```
    gh release create vX.Y.Z \
-     release/wisper-agent-win64.zip \
-     release/wisper-agent-setup-win64.exe \
+     release/wisper-agent-universal-win64.zip \
+     release/wisper-agent-nvidia-win64.zip \
+     release/wisper-agent-setup-universal-win64.exe \
+     release/wisper-agent-nvidia-setup-win64.exe \
      --title "vX.Y.Z — <short title>" \
      --notes "<changelog from Step 6>"
    ```
@@ -92,13 +115,17 @@ This produces `release/wisper-agent-setup-win64.exe`.
 
 ## Release assets checklist
 
-Every release MUST include both:
-- `wisper-agent-win64.zip` — portable ZIP (all exe + DLLs + icons)
-- `wisper-agent-setup-win64.exe` — Inno Setup installer
+Every release MUST include all four:
+- `wisper-agent-universal-win64.zip` — portable, CPU only
+- `wisper-agent-nvidia-win64.zip` — portable, CUDA + CPU fallback
+- `wisper-agent-setup-universal-win64.exe` — installer, CPU only
+- `wisper-agent-nvidia-setup-win64.exe` — installer, CUDA + CPU fallback
 
 ## Notes
 
 - Never publish a release without building fresh from the current HEAD
 - Always verify build succeeds before packaging
-- The installer script (`installer.iss`) sources files from `build/Release/` and `bin/Release/` — these paths must exist
-- `bin/Release/` contains pre-built whisper.cpp binaries that are NOT built by cmake — they are checked in / placed manually
+- `installer-universal.iss` and `installer-nvidia.iss` source files from `build/Release/` and `bin/Release/` — these paths must exist
+- `bin/Release/` contains pre-built whisper.cpp CPU binaries (not built by cmake)
+- `bin/cuda/` contains pre-built whisper.cpp CUDA binaries (not built by cmake)
+- The NVIDIA variant renames `bin/cuda/whisper-cli.exe` to `whisper-cli-cuda.exe` so the app detects it

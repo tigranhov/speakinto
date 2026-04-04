@@ -36,19 +36,16 @@ static std::string findValue(const std::string& json, const std::string& key) {
     if (pos == std::string::npos) return "";
     pos++;
 
-    // Skip whitespace
     while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\n' || json[pos] == '\r'))
         pos++;
 
     if (pos >= json.size()) return "";
 
     if (json[pos] == '"') {
-        // String value
         auto end = json.find('"', pos + 1);
         if (end == std::string::npos) return "";
         return json.substr(pos + 1, end - pos - 1);
     } else {
-        // Number or other
         auto end = json.find_first_of(",}\n\r ", pos);
         if (end == std::string::npos) end = json.size();
         return json.substr(pos, end - pos);
@@ -77,7 +74,7 @@ Settings load() {
     if (path.empty()) return s;
 
     std::ifstream file(path);
-    if (!file.is_open()) return s;
+    if (!file.is_open()) return s; // fresh install — struct defaults apply (Small)
 
     std::string json((std::istreambuf_iterator<char>(file)),
                       std::istreambuf_iterator<char>());
@@ -94,6 +91,14 @@ Settings load() {
         catch (...) {}
     }
 
+    auto modelStr = findValue(json, "modelSize");
+    if (!modelStr.empty()) {
+        s.modelSize = model::modelSizeFromString(modelStr);
+    } else {
+        // Existing user with old settings file — keep Base to avoid surprise download
+        s.modelSize = model::ModelSize::Base;
+    }
+
     return s;
 }
 
@@ -101,22 +106,21 @@ void save(const Settings& s) {
     auto dir = getSettingsDir();
     if (dir.empty()) return;
 
-    CreateDirectoryW(dir.c_str(), nullptr); // ensure dir exists
+    CreateDirectoryW(dir.c_str(), nullptr);
 
     auto path = getSettingsPath();
 
-    // Write to temp file then rename for atomicity
     auto tmpPath = path + L".tmp";
     std::ofstream file(tmpPath);
     if (!file.is_open()) return;
 
     file << "{\n";
     file << "  \"repeatPressMode\": \"" << modeToString(s.repeatPressMode) << "\",\n";
-    file << "  \"selectedMicIndex\": " << s.selectedMicIndex << "\n";
+    file << "  \"selectedMicIndex\": " << s.selectedMicIndex << ",\n";
+    file << "  \"modelSize\": \"" << model::modelSizeString(s.modelSize) << "\"\n";
     file << "}\n";
     file.close();
 
-    // Atomic rename (overwrite)
     MoveFileExW(tmpPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
 }
 
@@ -128,10 +132,16 @@ static bool g_dlgResult = false;
 static bool g_dlgClosed = false;
 static HWND g_dlgHwnd = nullptr;
 
-// Control IDs
+// Control IDs — repeat press mode
 static constexpr int ID_RADIO_FLASH  = 101;
 static constexpr int ID_RADIO_QUEUE  = 102;
 static constexpr int ID_RADIO_CANCEL = 103;
+// Control IDs — model size
+static constexpr int ID_RADIO_TINY   = 201;
+static constexpr int ID_RADIO_BASE   = 202;
+static constexpr int ID_RADIO_SMALL  = 203;
+static constexpr int ID_RADIO_MEDIUM = 204;
+// Buttons
 static constexpr int ID_OK           = IDOK;
 static constexpr int ID_CANCEL       = IDCANCEL;
 
@@ -140,13 +150,23 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         case WM_COMMAND: {
             int id = LOWORD(wParam);
             if (id == ID_OK) {
-                // Read radio state
+                // Read repeat-press mode
                 if (SendDlgItemMessageW(hwnd, ID_RADIO_FLASH, BM_GETCHECK, 0, 0) == BST_CHECKED)
                     g_dlgSettings->repeatPressMode = RepeatPressMode::Flash;
                 else if (SendDlgItemMessageW(hwnd, ID_RADIO_CANCEL, BM_GETCHECK, 0, 0) == BST_CHECKED)
                     g_dlgSettings->repeatPressMode = RepeatPressMode::Cancel;
                 else
                     g_dlgSettings->repeatPressMode = RepeatPressMode::Queue;
+
+                // Read model size
+                if (SendDlgItemMessageW(hwnd, ID_RADIO_TINY, BM_GETCHECK, 0, 0) == BST_CHECKED)
+                    g_dlgSettings->modelSize = model::ModelSize::Tiny;
+                else if (SendDlgItemMessageW(hwnd, ID_RADIO_BASE, BM_GETCHECK, 0, 0) == BST_CHECKED)
+                    g_dlgSettings->modelSize = model::ModelSize::Base;
+                else if (SendDlgItemMessageW(hwnd, ID_RADIO_MEDIUM, BM_GETCHECK, 0, 0) == BST_CHECKED)
+                    g_dlgSettings->modelSize = model::ModelSize::Medium;
+                else
+                    g_dlgSettings->modelSize = model::ModelSize::Small;
 
                 g_dlgResult = true;
                 DestroyWindow(hwnd);
@@ -171,8 +191,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-bool showSettingsDialog(HINSTANCE hInstance, Settings& s) {
-    // Register window class (idempotent)
+bool showSettingsDialog(HINSTANCE hInstance, Settings& s, const wchar_t* backendInfo) {
     WNDCLASSEXW wc = {};
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = SettingsWndProc;
@@ -180,13 +199,12 @@ bool showSettingsDialog(HINSTANCE hInstance, Settings& s) {
     wc.lpszClassName = SETTINGS_CLASS;
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    RegisterClassExW(&wc); // OK if already registered
+    RegisterClassExW(&wc);
 
     g_dlgSettings = &s;
     g_dlgResult = false;
 
-    // Center on screen
-    int dlgW = 340, dlgH = 230;
+    int dlgW = 340, dlgH = 400;
     int screenW = GetSystemMetrics(SM_CXSCREEN);
     int screenH = GetSystemMetrics(SM_CYSCREEN);
     int x = (screenW - dlgW) / 2;
@@ -203,17 +221,15 @@ bool showSettingsDialog(HINSTANCE hInstance, Settings& s) {
 
     if (!g_dlgHwnd) return false;
 
-    // Default font
     HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
 
-    // Group box
-    HWND hGroup = CreateWindowExW(0, L"BUTTON", L"When hotkey pressed during transcription:",
+    // --- Repeat press mode group ---
+    HWND hGroup1 = CreateWindowExW(0, L"BUTTON", L"When hotkey pressed during transcription:",
         WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
         10, 10, 310, 130,
         g_dlgHwnd, nullptr, hInstance, nullptr);
-    SendMessageW(hGroup, WM_SETFONT, (WPARAM)hFont, TRUE);
+    SendMessageW(hGroup1, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-    // Radio buttons
     HWND hFlash = CreateWindowExW(0, L"BUTTON", L"Flash overlay (acknowledge only)",
         WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
         25, 35, 280, 22,
@@ -226,41 +242,87 @@ bool showSettingsDialog(HINSTANCE hInstance, Settings& s) {
         g_dlgHwnd, (HMENU)(INT_PTR)ID_RADIO_QUEUE, hInstance, nullptr);
     SendMessageW(hQueue, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-    HWND hCancel = CreateWindowExW(0, L"BUTTON", L"Cancel and re-record",
+    HWND hCancelRb = CreateWindowExW(0, L"BUTTON", L"Cancel and re-record",
         WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
         25, 95, 280, 22,
         g_dlgHwnd, (HMENU)(INT_PTR)ID_RADIO_CANCEL, hInstance, nullptr);
-    SendMessageW(hCancel, WM_SETFONT, (WPARAM)hFont, TRUE);
+    SendMessageW(hCancelRb, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-    // Set current selection
     switch (s.repeatPressMode) {
         case RepeatPressMode::Flash:
             SendMessageW(hFlash, BM_SETCHECK, BST_CHECKED, 0); break;
         case RepeatPressMode::Cancel:
-            SendMessageW(hCancel, BM_SETCHECK, BST_CHECKED, 0); break;
+            SendMessageW(hCancelRb, BM_SETCHECK, BST_CHECKED, 0); break;
         default:
             SendMessageW(hQueue, BM_SETCHECK, BST_CHECKED, 0); break;
     }
 
+    // --- Model size group ---
+    HWND hGroup2 = CreateWindowExW(0, L"BUTTON", L"Transcription model:",
+        WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+        10, 150, 310, 140,
+        g_dlgHwnd, nullptr, hInstance, nullptr);
+    SendMessageW(hGroup2, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+    HWND hTiny = CreateWindowExW(0, L"BUTTON", L"Tiny (~75MB)",
+        WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
+        25, 175, 280, 22,
+        g_dlgHwnd, (HMENU)(INT_PTR)ID_RADIO_TINY, hInstance, nullptr);
+    SendMessageW(hTiny, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+    HWND hBase = CreateWindowExW(0, L"BUTTON", L"Base (~150MB)",
+        WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+        25, 200, 280, 22,
+        g_dlgHwnd, (HMENU)(INT_PTR)ID_RADIO_BASE, hInstance, nullptr);
+    SendMessageW(hBase, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+    HWND hSmall = CreateWindowExW(0, L"BUTTON", L"Small (~500MB, recommended)",
+        WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+        25, 225, 280, 22,
+        g_dlgHwnd, (HMENU)(INT_PTR)ID_RADIO_SMALL, hInstance, nullptr);
+    SendMessageW(hSmall, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+    HWND hMedium = CreateWindowExW(0, L"BUTTON", L"Medium (~1.5GB)",
+        WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+        25, 250, 280, 22,
+        g_dlgHwnd, (HMENU)(INT_PTR)ID_RADIO_MEDIUM, hInstance, nullptr);
+    SendMessageW(hMedium, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+    switch (s.modelSize) {
+        case model::ModelSize::Tiny:
+            SendMessageW(hTiny, BM_SETCHECK, BST_CHECKED, 0); break;
+        case model::ModelSize::Base:
+            SendMessageW(hBase, BM_SETCHECK, BST_CHECKED, 0); break;
+        case model::ModelSize::Medium:
+            SendMessageW(hMedium, BM_SETCHECK, BST_CHECKED, 0); break;
+        default:
+            SendMessageW(hSmall, BM_SETCHECK, BST_CHECKED, 0); break;
+    }
+
+    // Backend info line
+    HWND hInfo = CreateWindowExW(0, L"STATIC", backendInfo,
+        WS_CHILD | WS_VISIBLE,
+        10, 298, 310, 18,
+        g_dlgHwnd, nullptr, hInstance, nullptr);
+    SendMessageW(hInfo, WM_SETFONT, (WPARAM)hFont, TRUE);
+
     // OK / Cancel buttons
     HWND hOk = CreateWindowExW(0, L"BUTTON", L"OK",
         WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-        150, 155, 80, 28,
+        150, 325, 80, 28,
         g_dlgHwnd, (HMENU)(INT_PTR)ID_OK, hInstance, nullptr);
     SendMessageW(hOk, WM_SETFONT, (WPARAM)hFont, TRUE);
 
     HWND hCancelBtn = CreateWindowExW(0, L"BUTTON", L"Cancel",
         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-        240, 155, 80, 28,
+        240, 325, 80, 28,
         g_dlgHwnd, (HMENU)(INT_PTR)ID_CANCEL, hInstance, nullptr);
     SendMessageW(hCancelBtn, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-    // Show and set foreground
     g_dialogOpen = true;
     ShowWindow(g_dlgHwnd, SW_SHOW);
     SetForegroundWindow(g_dlgHwnd);
 
-    // Nested message loop (flag-based, avoids PostQuitMessage killing the outer loop)
     g_dlgClosed = false;
     MSG msg;
     while (!g_dlgClosed) {

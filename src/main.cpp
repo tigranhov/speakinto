@@ -27,11 +27,20 @@ static constexpr int MIN_RECORDING_MS = 500;
 // Repeat-press mode
 static settings::RepeatPressMode g_repeatMode = settings::RepeatPressMode::Queue;
 
+// Model
+static model::ModelSize g_modelSize = model::ModelSize::Small;
+static bool g_downloading = false;
+
 // Custom messages for async operations
 constexpr UINT WM_TRANSCRIPTION_DONE = WM_APP + 20;
+constexpr UINT WM_GPU_FALLBACK = WM_APP + 21;
+constexpr UINT WM_MODEL_READY = WM_APP + 22;
+constexpr UINT WM_MODEL_PROGRESS = WM_APP + 23;
 
 // Paths
-static std::wstring g_whisperExe;
+static std::wstring g_whisperExeGpu;  // CUDA path, empty if not found
+static std::wstring g_whisperExeCpu;  // CPU path, always set
+static bool g_usingGpu = false;
 static std::wstring g_modelPath;
 
 static void log(const char* fmt, ...) {
@@ -54,23 +63,39 @@ static void refreshDevices() {
     }
 }
 
+static bool fileExists(const std::wstring& path) {
+    return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
 static void findWhisperPaths() {
     wchar_t exePath[MAX_PATH];
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
     std::wstring dir(exePath);
     dir = dir.substr(0, dir.find_last_of(L'\\') + 1);
 
-    // Try release layout: whisper-cli.exe next to wisper-agent.exe
-    g_whisperExe = dir + L"whisper-cli.exe";
-    if (GetFileAttributesW(g_whisperExe.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        // Try dev layout: build/Release/wisper-agent.exe → ../../bin/Release/whisper-cli.exe
-        g_whisperExe = dir + L"..\\..\\bin\\Release\\whisper-cli.exe";
+    // CPU binary (always present)
+    g_whisperExeCpu = dir + L"whisper-cli.exe";
+    if (!fileExists(g_whisperExeCpu)) {
+        g_whisperExeCpu = dir + L"..\\..\\bin\\Release\\whisper-cli.exe";
     }
 
-    // Model path from model manager
-    g_modelPath = model::getModelPath();
+    // GPU binary (CUDA, optional)
+    std::wstring cudaPath = dir + L"whisper-cli-cuda.exe";
+    if (fileExists(cudaPath)) {
+        g_whisperExeGpu = cudaPath;
+    } else {
+        cudaPath = dir + L"..\\..\\bin\\cuda\\whisper-cli.exe";
+        if (fileExists(cudaPath)) {
+            g_whisperExeGpu = cudaPath;
+        }
+    }
 
-    log("Whisper exe: %ls", g_whisperExe.c_str());
+    g_usingGpu = !g_whisperExeGpu.empty();
+
+    g_modelPath = model::getModelPath(g_modelSize);
+
+    auto& activeExe = g_usingGpu ? g_whisperExeGpu : g_whisperExeCpu;
+    log("Whisper exe: %ls (%s)", activeExe.c_str(), g_usingGpu ? "CUDA" : "CPU");
     log("Model path: %ls", g_modelPath.c_str());
 }
 
@@ -78,6 +103,7 @@ static void saveCurrentSettings() {
     settings::Settings cfg;
     cfg.repeatPressMode = g_repeatMode;
     cfg.selectedMicIndex = g_selectedDeviceIndex;
+    cfg.modelSize = g_modelSize;
     settings::save(cfg);
 }
 
@@ -159,13 +185,15 @@ static void onComboUp() {
     tray::setState(tray::State::Transcribing);
     overlay::setState(overlay::State::Transcribing);
 
-    // Run transcription on background thread
+    // Run transcription on background thread — capture paths to avoid racing with WM_GPU_FALLBACK
     HWND hwnd = g_hwnd;
-    std::thread([result = std::move(result), hwnd]() {
-        // Reset cancel flag at start of transcription
+    auto whisperExe = g_usingGpu ? g_whisperExeGpu : g_whisperExeCpu;
+    auto whisperCpu = g_whisperExeCpu;
+    auto modelPath = g_modelPath;
+    bool usingGpu = g_usingGpu;
+    std::thread([result = std::move(result), hwnd, whisperExe, whisperCpu, modelPath, usingGpu]() {
         transcriber::resetCancelFlag();
 
-        // Write WAV
         auto wavPath = wav::writeTemp(result.samples, result.sampleRate, result.channels);
         if (wavPath.empty()) {
             log("Failed to write WAV file");
@@ -175,23 +203,29 @@ static void onComboUp() {
 
         log("WAV written: %ls", wavPath.c_str());
 
-        // Transcribe
-        std::string text = transcriber::transcribe(wavPath, g_whisperExe, g_modelPath);
+        auto txResult = transcriber::transcribe(wavPath, whisperExe, modelPath);
+        if (!txResult.processOk && usingGpu) {
+            log("GPU transcription failed, retrying with CPU");
+            txResult = transcriber::transcribe(wavPath, whisperCpu, modelPath);
+            if (txResult.processOk) {
+                PostMessage(hwnd, WM_GPU_FALLBACK, 0, 0);
+            }
+        }
 
         // Delete temp file
         DeleteFileW(wavPath.c_str());
 
         // Check for cancellation before injecting text
-        if (text.empty() || transcriber::isCancelRequested()) {
-            if (!text.empty()) log("Transcription cancelled, discarding text");
+        if (txResult.text.empty() || transcriber::isCancelRequested()) {
+            if (!txResult.text.empty()) log("Transcription cancelled, discarding text");
             PostMessage(hwnd, WM_TRANSCRIPTION_DONE, 0, 0);
             return;
         }
 
-        log("Transcribed: %s", text.c_str());
+        log("Transcribed: %s", txResult.text.c_str());
 
         // Inject text (must happen on this thread since SendInput is thread-agnostic)
-        injector::injectText(text);
+        injector::injectText(txResult.text);
 
         // Return to Idle immediately so user can record again
         PostMessage(hwnd, WM_TRANSCRIPTION_DONE, 0, 0);
@@ -210,6 +244,48 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case keyboard::WM_COMBO_UP:
             onComboUp();
             return 0;
+
+        case WM_GPU_FALLBACK:
+            g_usingGpu = false;
+            log("Switched to CPU backend permanently");
+            return 0;
+
+        case WM_MODEL_PROGRESS:
+            overlay::setState(overlay::State::Downloading, (int)wParam);
+            return 0;
+
+        case WM_MODEL_READY: {
+            // wParam = old model size (-1 if startup/no previous model)
+            // lParam = 1 on success, 0 on failure
+            g_downloading = false;
+            overlay::setState(overlay::State::Idle);
+            tray::setState(tray::State::Idle);
+            bool success = lParam != 0;
+            auto oldSize = (int)wParam;
+            bool isStartup = (oldSize == -1);
+
+            if (!success) {
+                tray::showBalloon(L"Wisper Agent", L"Model download failed.");
+                if (!isStartup) {
+                    // Revert to old working model so transcription keeps working
+                    g_modelSize = (model::ModelSize)oldSize;
+                    g_modelPath = model::getModelPath(g_modelSize);
+                    saveCurrentSettings();
+                    log("Reverted to model: %s", model::modelSizeName(g_modelSize));
+                }
+            } else if (model::modelExists(g_modelSize)) {
+                g_modelPath = model::getModelPath(g_modelSize);
+                model::deleteAllExcept(g_modelSize);
+                if (isStartup) {
+                    g_state = AppState::Idle;
+                    tray::showBalloon(L"Wisper Agent", L"Ready \u2014 press Ctrl+` to dictate");
+                } else {
+                    tray::showBalloon(L"Wisper Agent", L"New model ready.");
+                }
+                log("Model ready: %s", model::modelSizeName(g_modelSize));
+            }
+            return 0;
+        }
 
         case WM_TRANSCRIPTION_DONE:
             // If already recording a new one (Queue/Cancel started it during
@@ -236,9 +312,40 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 settings::Settings cfg;
                 cfg.repeatPressMode = g_repeatMode;
                 cfg.selectedMicIndex = g_selectedDeviceIndex;
-                if (settings::showSettingsDialog(g_hInstance, cfg)) {
+                cfg.modelSize = g_modelSize;
+                const wchar_t* backendInfo = g_usingGpu
+                    ? L"Transcription backend: CUDA (GPU)"
+                    : L"Transcription backend: CPU";
+                if (settings::showSettingsDialog(g_hInstance, cfg, backendInfo)) {
                     g_repeatMode = cfg.repeatPressMode;
                     g_selectedDeviceIndex = cfg.selectedMicIndex;
+
+                    // Handle model change
+                    if (cfg.modelSize != g_modelSize) {
+                        if (g_downloading) {
+                            tray::showBalloon(L"Wisper Agent", L"A model download is already in progress.");
+                        } else {
+                            model::ModelSize oldSize = g_modelSize;
+                            g_modelSize = cfg.modelSize;
+
+                            if (model::modelExists(g_modelSize)) {
+                                g_modelPath = model::getModelPath(g_modelSize);
+                                model::deleteAllExcept(g_modelSize);
+                                tray::showBalloon(L"Wisper Agent", L"Model switched.");
+                            } else {
+                                g_downloading = true;
+                                tray::setState(tray::State::Downloading);
+                                overlay::setState(overlay::State::Downloading, 0);
+                                std::thread([newSize = g_modelSize, oldSize, hwndMsg = g_hwnd]() {
+                                    bool ok = model::downloadModel(newSize, [hwndMsg](int percent) {
+                                        PostMessage(hwndMsg, WM_MODEL_PROGRESS, percent, 0);
+                                    });
+                                    PostMessage(hwndMsg, WM_MODEL_READY, (WPARAM)oldSize, ok ? 1 : 0);
+                                }).detach();
+                            }
+                        }
+                    }
+
                     saveCurrentSettings();
                 }
             } else if (id >= tray::IDM_MIC_BASE && id < tray::IDM_MIC_BASE + 100) {
@@ -288,6 +395,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     settings::Settings cfg = settings::load();
     g_selectedDeviceIndex = cfg.selectedMicIndex;
     g_repeatMode = cfg.repeatPressMode;
+    g_modelSize = cfg.modelSize;
 
     tray::create(g_hwnd);
     overlay::create(hInstance);
@@ -296,32 +404,26 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     keyboard::start(g_hwnd);
     tray::setState(tray::State::Initializing);
 
-    // Check and download model if needed
-    if (!model::modelExists()) {
-        log("Model not found, downloading...");
-        tray::showBalloon(L"Wisper Agent", L"Downloading speech model (~150MB)...");
-        bool downloaded = model::downloadModel([](int percent) {
-            if (percent % 10 == 0) {
-                char buf[64];
-                snprintf(buf, sizeof(buf), "Model download: %d%%", percent);
-                OutputDebugStringA(buf);
-                OutputDebugStringA("\n");
-                fprintf(stderr, "%s\n", buf);
-            }
-        });
-        if (downloaded) {
-            tray::showBalloon(L"Wisper Agent", L"Model downloaded successfully.");
-            g_modelPath = model::getModelPath();
-        } else {
-            tray::showBalloon(L"Wisper Agent", L"Failed to download model. Transcription won't work.");
-        }
+    // Check and download model if needed (async to keep UI responsive)
+    if (!model::modelExists(g_modelSize)) {
+        log("Model %s not found, downloading...", model::modelSizeName(g_modelSize));
+        tray::showBalloon(L"Wisper Agent", L"Downloading speech model...");
+        g_downloading = true;
+        overlay::setState(overlay::State::Downloading, 0);
+        std::thread([size = g_modelSize, hwnd = g_hwnd]() {
+            bool ok = model::downloadModel(size, [hwnd](int percent) {
+                PostMessage(hwnd, WM_MODEL_PROGRESS, percent, 0);
+            });
+            // wParam = -1 (no old model), lParam = success flag, special startup case
+            PostMessage(hwnd, WM_MODEL_READY, (WPARAM)(-1), ok ? 1 : 0);
+        }).detach();
+    } else {
+        // Model already present — go straight to ready
+        g_state = AppState::Idle;
+        tray::setState(tray::State::Idle);
+        overlay::setState(overlay::State::Idle);
+        tray::showBalloon(L"Wisper Agent", L"Ready \u2014 press Ctrl+` to dictate");
     }
-
-    // Initialization complete
-    g_state = AppState::Idle;
-    tray::setState(tray::State::Idle);
-    overlay::setState(overlay::State::Idle);
-    tray::showBalloon(L"Wisper Agent", L"Ready \u2014 press Ctrl+` to dictate");
 
     log("Wisper Agent is running. Hold Ctrl+` to record.");
 

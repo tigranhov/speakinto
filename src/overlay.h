@@ -8,11 +8,12 @@ enum class State {
     Initializing,
     Recording,
     Transcribing,
+    Downloading,
 };
 
 void create(HINSTANCE hInstance);
 void destroy();
-void setState(State state);
+void setState(State state, int percent = 0);
 void flash();
 
 }

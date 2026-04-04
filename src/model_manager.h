@@ -4,14 +4,16 @@
 
 namespace model {
 
-// Get the expected model path: %APPDATA%/wisper-agent/models/ggml-base.bin
-std::wstring getModelPath();
+enum class ModelSize { Tiny, Base, Small, Medium };
 
-// Check if the model file exists and is valid (>100MB)
-bool modelExists();
+const char* modelSizeName(ModelSize size);
+const char* modelSizeString(ModelSize size);     // for JSON: "tiny", "base", etc.
+ModelSize modelSizeFromString(const std::string& s); // parse from JSON
 
-// Download the model from HuggingFace. Calls onProgress(percent) during download.
-// Returns true on success.
-bool downloadModel(std::function<void(int percent)> onProgress = nullptr);
+std::wstring getModelPath(ModelSize size);
+bool modelExists(ModelSize size);
+bool downloadModel(ModelSize size, std::function<void(int percent)> onProgress = nullptr);
+void deleteModel(ModelSize size);
+void deleteAllExcept(ModelSize keep);
 
 }

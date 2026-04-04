@@ -9,10 +9,50 @@
 
 namespace model {
 
-static const wchar_t* MODEL_FILENAME = L"ggml-base.bin";
-static const wchar_t* MODEL_HOST = L"huggingface.co";
-static const wchar_t* MODEL_PATH = L"/ggerganov/whisper.cpp/resolve/main/ggml-base.bin";
-static constexpr size_t MIN_MODEL_SIZE = 100 * 1024 * 1024; // 100MB minimum
+// --- Model table ---
+
+struct ModelInfo {
+    const wchar_t* filename;
+    const wchar_t* urlPath;
+    size_t minSize;
+    const char* displayName;
+    const char* jsonName;
+};
+
+static const ModelInfo MODEL_TABLE[] = {
+    // Tiny
+    { L"ggml-tiny.bin",
+      L"/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
+      30 * 1024 * 1024, "Tiny (~75MB)", "tiny" },
+    // Base
+    { L"ggml-base.bin",
+      L"/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
+      100 * 1024 * 1024, "Base (~150MB)", "base" },
+    // Small
+    { L"ggml-small.bin",
+      L"/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+      400 * 1024 * 1024, "Small (~500MB)", "small" },
+    // Medium
+    { L"ggml-medium.bin",
+      L"/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
+      1000ULL * 1024 * 1024, "Medium (~1.5GB)", "medium" },
+};
+
+static const ModelInfo& getInfo(ModelSize size) {
+    return MODEL_TABLE[static_cast<int>(size)];
+}
+
+const char* modelSizeName(ModelSize size) { return getInfo(size).displayName; }
+const char* modelSizeString(ModelSize size) { return getInfo(size).jsonName; }
+
+ModelSize modelSizeFromString(const std::string& s) {
+    if (s == "tiny") return ModelSize::Tiny;
+    if (s == "base") return ModelSize::Base;
+    if (s == "medium") return ModelSize::Medium;
+    return ModelSize::Small;
+}
+
+// --- Logging ---
 
 static void log(const char* fmt, ...) {
     va_list args;
@@ -25,6 +65,8 @@ static void log(const char* fmt, ...) {
     fprintf(stderr, "%s\n", buf);
 }
 
+// --- Paths ---
+
 static std::wstring getModelDir() {
     wchar_t appdata[MAX_PATH];
     if (FAILED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appdata))) {
@@ -33,14 +75,16 @@ static std::wstring getModelDir() {
     return std::wstring(appdata) + L"\\wisper-agent\\models";
 }
 
-std::wstring getModelPath() {
+std::wstring getModelPath(ModelSize size) {
     auto dir = getModelDir();
     if (dir.empty()) return L"";
-    return dir + L"\\" + MODEL_FILENAME;
+    return dir + L"\\" + getInfo(size).filename;
 }
 
-bool modelExists() {
-    auto path = getModelPath();
+// --- Existence check ---
+
+bool modelExists(ModelSize size) {
+    auto path = getModelPath(size);
     if (path.empty()) return false;
 
     WIN32_FILE_ATTRIBUTE_DATA fileInfo;
@@ -48,16 +92,31 @@ bool modelExists() {
         return false;
     }
 
-    // Check file size (base model should be ~148MB)
-    ULONGLONG size = ((ULONGLONG)fileInfo.nFileSizeHigh << 32) | fileInfo.nFileSizeLow;
-    return size >= MIN_MODEL_SIZE;
+    ULONGLONG fileSize = ((ULONGLONG)fileInfo.nFileSizeHigh << 32) | fileInfo.nFileSizeLow;
+    return fileSize >= getInfo(size).minSize;
 }
+
+// --- Delete ---
+
+void deleteModel(ModelSize size) {
+    auto path = getModelPath(size);
+    if (!path.empty()) {
+        DeleteFileW(path.c_str());
+    }
+}
+
+void deleteAllExcept(ModelSize keep) {
+    for (auto s : {ModelSize::Tiny, ModelSize::Base, ModelSize::Small, ModelSize::Medium}) {
+        if (s != keep) deleteModel(s);
+    }
+}
+
+// --- Directory creation ---
 
 static bool ensureDirectory(const std::wstring& dir) {
     DWORD attrs = GetFileAttributesW(dir.c_str());
     if (attrs != INVALID_FILE_ATTRIBUTES) return true;
 
-    // Create parent directories recursively
     size_t pos = dir.find_last_of(L'\\');
     if (pos != std::wstring::npos) {
         ensureDirectory(dir.substr(0, pos));
@@ -65,9 +124,14 @@ static bool ensureDirectory(const std::wstring& dir) {
     return CreateDirectoryW(dir.c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS;
 }
 
-bool downloadModel(std::function<void(int percent)> onProgress) {
+// --- Download ---
+
+static const wchar_t* MODEL_HOST = L"huggingface.co";
+
+bool downloadModel(ModelSize size, std::function<void(int percent)> onProgress) {
+    auto& info = getInfo(size);
     auto modelDir = getModelDir();
-    auto modelPath = getModelPath();
+    auto modelPath = getModelPath(size);
     if (modelDir.empty() || modelPath.empty()) {
         log("Failed to determine model path");
         return false;
@@ -78,9 +142,8 @@ bool downloadModel(std::function<void(int percent)> onProgress) {
         return false;
     }
 
-    log("Downloading model to: %ls", modelPath.c_str());
+    log("Downloading model %s to: %ls", info.displayName, modelPath.c_str());
 
-    // Open WinHTTP session
     HINTERNET hSession = WinHttpOpen(L"WisperAgent/1.0",
                                       WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                       WINHTTP_NO_PROXY_NAME,
@@ -98,7 +161,7 @@ bool downloadModel(std::function<void(int percent)> onProgress) {
         return false;
     }
 
-    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", MODEL_PATH,
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", info.urlPath,
                                              nullptr, WINHTTP_NO_REFERER,
                                              WINHTTP_DEFAULT_ACCEPT_TYPES,
                                              WINHTTP_FLAG_SECURE);
@@ -140,7 +203,6 @@ bool downloadModel(std::function<void(int percent)> onProgress) {
 
             log("Redirect to: %ls", newUrl);
 
-            // Parse the redirect URL
             URL_COMPONENTS urlComp = {};
             urlComp.dwStructSize = sizeof(urlComp);
             wchar_t hostBuf[256] = {};
@@ -194,7 +256,6 @@ bool downloadModel(std::function<void(int percent)> onProgress) {
     int lastPercent = -1;
     char buffer[65536];
     DWORD bytesRead = 0;
-    bool success = true;
 
     while (WinHttpReadData(hRequest, buffer, sizeof(buffer), &bytesRead) && bytesRead > 0) {
         outFile.write(buffer, bytesRead);
@@ -216,21 +277,21 @@ bool downloadModel(std::function<void(int percent)> onProgress) {
     WinHttpCloseHandle(hSession);
 
     // Verify size
-    if (totalRead < MIN_MODEL_SIZE) {
-        log("Downloaded file too small: %lu bytes", totalRead);
+    if (totalRead < info.minSize) {
+        log("Downloaded file too small: %lu bytes (min %zu)", totalRead, info.minSize);
         DeleteFileW(tempPath.c_str());
         return false;
     }
 
     // Rename temp to final
-    DeleteFileW(modelPath.c_str()); // Remove old if exists
+    DeleteFileW(modelPath.c_str());
     if (!MoveFileW(tempPath.c_str(), modelPath.c_str())) {
         log("Failed to rename temp file: %lu", GetLastError());
         DeleteFileW(tempPath.c_str());
         return false;
     }
 
-    log("Model downloaded successfully: %lu bytes", totalRead);
+    log("Model %s downloaded successfully: %lu bytes", info.displayName, totalRead);
     return true;
 }
 

@@ -10,9 +10,20 @@ namespace transcriber {
 static HANDLE g_currentProcess = nullptr;
 static std::mutex g_processMutex;
 static std::atomic<bool> g_cancelRequested{false};
+static HANDLE g_hNul = INVALID_HANDLE_VALUE;
 
 bool isCancelRequested() { return g_cancelRequested; }
 void resetCancelFlag() { g_cancelRequested = false; }
+
+static HANDLE getNulHandle() {
+    if (g_hNul == INVALID_HANDLE_VALUE) {
+        SECURITY_ATTRIBUTES sa = {};
+        sa.nLength = sizeof(sa);
+        sa.bInheritHandle = TRUE;
+        g_hNul = CreateFileW(L"NUL", GENERIC_WRITE, 0, &sa, OPEN_EXISTING, 0, nullptr);
+    }
+    return g_hNul;
+}
 
 static std::string readPipe(HANDLE pipe) {
     std::string output;
@@ -43,7 +54,8 @@ static std::string cleanOutput(const std::string& text) {
     }
 
     // Collapse whitespace
-    cleaned = std::regex_replace(cleaned, std::regex(R"(\s+)"), " ");
+    static const std::regex whitespace(R"(\s+)");
+    cleaned = std::regex_replace(cleaned, whitespace, " ");
 
     // Trim
     size_t start = cleaned.find_first_not_of(" \t\r\n");
@@ -52,7 +64,7 @@ static std::string cleanOutput(const std::string& text) {
     return cleaned.substr(start, end - start + 1);
 }
 
-std::string transcribe(const std::wstring& wavPath, const std::wstring& whisperExe, const std::wstring& modelPath) {
+TranscribeResult transcribe(const std::wstring& wavPath, const std::wstring& whisperExe, const std::wstring& modelPath) {
     // Build command line
     std::wstring cmdLine = L"\"" + whisperExe + L"\" -m \"" + modelPath + L"\" -f \"" + wavPath + L"\" --no-timestamps -l auto --no-prints";
 
@@ -68,7 +80,7 @@ std::string transcribe(const std::wstring& wavPath, const std::wstring& whisperE
     STARTUPINFOW si = {};
     si.cb = sizeof(si);
     si.hStdOutput = stdoutWrite;
-    si.hStdError = stdoutWrite;
+    si.hStdError = getNulHandle(); // Discard stderr (CUDA/ggml diagnostic output)
     si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_HIDE;
 
@@ -81,7 +93,7 @@ std::string transcribe(const std::wstring& wavPath, const std::wstring& whisperE
                         CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
         CloseHandle(stdoutRead);
         CloseHandle(stdoutWrite);
-        return "";
+        return {"", false};
     }
 
     CloseHandle(stdoutWrite); // Close write end in parent
@@ -111,9 +123,9 @@ std::string transcribe(const std::wstring& wavPath, const std::wstring& whisperE
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
 
-    if (exitCode != 0) return "";
+    if (exitCode != 0) return {"", false};
 
-    return cleanOutput(output);
+    return {cleanOutput(output), true};
 }
 
 void cancelCurrent() {

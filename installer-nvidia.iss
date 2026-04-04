@@ -1,13 +1,13 @@
 [Setup]
 AppName=Wisper Agent
-AppVersion=0.1.2
+AppVersion=0.2.0
 AppPublisher=tigranhov
 AppPublisherURL=https://github.com/tigranhov/wisper-agent
 DefaultDirName={autopf}\Wisper Agent
 DefaultGroupName=Wisper Agent
 UninstallDisplayIcon={app}\wisper-agent.exe
 OutputDir=release
-OutputBaseFilename=wisper-agent-setup-win64
+OutputBaseFilename=wisper-agent-nvidia-setup-win64
 Compression=lzma2
 SolidCompression=yes
 ArchitecturesAllowed=x64compatible
@@ -16,12 +16,21 @@ PrivilegesRequired=lowest
 SetupIconFile=assets\icons\icon.ico
 
 [Files]
+; Main application
 Source: "build\Release\wisper-agent.exe"; DestDir: "{app}"; Flags: ignoreversion
+; CPU whisper (fallback)
 Source: "bin\Release\whisper-cli.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "bin\Release\whisper.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "bin\Release\ggml.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "bin\Release\ggml-cpu.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "bin\Release\ggml-base.dll"; DestDir: "{app}"; Flags: ignoreversion
+; CUDA whisper (GPU accelerated)
+Source: "bin\cuda\whisper-cli.exe"; DestDir: "{app}"; DestName: "whisper-cli-cuda.exe"; Flags: ignoreversion
+Source: "bin\cuda\ggml-cuda.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "bin\cuda\cublas64_12.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "bin\cuda\cublasLt64_12.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "bin\cuda\cudart64_12.dll"; DestDir: "{app}"; Flags: ignoreversion
+; Icons
 Source: "assets\icons\*.ico"; DestDir: "{app}\assets\icons"; Flags: ignoreversion
 
 [Icons]

@@ -1,4 +1,5 @@
 #include "overlay.h"
+#include <cstdio>
 
 namespace overlay {
 
@@ -7,6 +8,7 @@ static State g_state = State::Idle;
 static HFONT g_font = nullptr;
 static constexpr int DEFAULT_WIDTH = 80;
 static constexpr int INIT_WIDTH = 110;
+static constexpr int DL_WIDTH = 110;
 static constexpr int HEIGHT = 30;
 static constexpr int CORNER_RADIUS = 15;
 
@@ -18,6 +20,10 @@ static constexpr UINT FLASH_TIMER_ID = 1;
 
 // Auto-hide timer for Initializing state
 static constexpr UINT INIT_HIDE_TIMER_ID = 2;
+
+// Download progress
+static int g_downloadPercent = 0;
+static wchar_t g_dlText[16] = L"DL 0%";
 
 static void positionOnActiveMonitor() {
     HMONITOR hMon = nullptr;
@@ -66,6 +72,9 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         } else if (g_state == State::Transcribing) {
             fillColor = g_flashing ? RGB(255, 255, 255) : RGB(50, 120, 220);
             text = L"...";
+        } else if (g_state == State::Downloading) {
+            fillColor = RGB(50, 180, 80);  // Green
+            text = g_dlText;
         } else {
             EndPaint(hwnd, &ps);
             return 0;
@@ -157,9 +166,15 @@ void destroy() {
     }
 }
 
-void setState(State state) {
+void setState(State state, int percent) {
     g_state = state;
     g_flashing = false;
+
+    if (state == State::Downloading) {
+        g_downloadPercent = percent;
+        swprintf_s(g_dlText, L"DL %d%%", percent);
+    }
+
     if (!g_hwnd) return;
 
     // Kill any running timers
@@ -169,7 +184,7 @@ void setState(State state) {
     if (state == State::Idle) {
         ShowWindow(g_hwnd, SW_HIDE);
     } else {
-        g_currentWidth = (state == State::Initializing) ? INIT_WIDTH : DEFAULT_WIDTH;
+        g_currentWidth = (state == State::Initializing || state == State::Downloading) ? INIT_WIDTH : DEFAULT_WIDTH;
         positionOnActiveMonitor();
         InvalidateRect(g_hwnd, nullptr, TRUE);
         ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
