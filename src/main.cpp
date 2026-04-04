@@ -251,7 +251,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
 
     keyboard::start(g_hwnd);
 
-    log("Wisper Agent is running. Hold Ctrl+Win to record.");
+    log("Wisper Agent is running. Hold Ctrl+` to record.");
 
     // Message loop
     MSG msg;

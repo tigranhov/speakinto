@@ -41,7 +41,7 @@ void create(HWND hwnd) {
     g_nid.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
     g_nid.uCallbackMessage = WM_TRAY_ICON;
     g_nid.hIcon = g_iconIdle;
-    wcscpy_s(g_nid.szTip, L"Wisper Agent \u2014 Ready (Ctrl+Win)");
+    wcscpy_s(g_nid.szTip, L"Wisper Agent \u2014 Ready (Ctrl+`)");
 
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 }
@@ -54,7 +54,7 @@ void setState(State state) {
     switch (state) {
         case State::Idle:
             g_nid.hIcon = g_iconIdle;
-            wcscpy_s(g_nid.szTip, L"Wisper Agent \u2014 Ready (Ctrl+Win)");
+            wcscpy_s(g_nid.szTip, L"Wisper Agent \u2014 Ready (Ctrl+`)");
             break;
         case State::Recording:
             g_nid.hIcon = g_iconRecording;
