@@ -76,6 +76,9 @@ static void captureThreadProc() {
     // COM must be initialized per-thread
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
+    // Start() blocks ~500ms in shared mode — runs here to avoid blocking UI
+    g_audioClient->Start();
+
     UINT32 bufferFrameCount = 0;
     g_audioClient->GetBufferSize(&bufferFrameCount);
 
@@ -109,7 +112,15 @@ static void captureThreadProc() {
     CoUninitialize();
 }
 
-bool startCapture(const std::wstring& deviceId) {
+static std::wstring g_preparedDeviceId;
+static bool g_prepared = false;
+
+bool prepare(const std::wstring& deviceId) {
+    // Release previous client if any
+    if (g_captureClient) { g_captureClient->Release(); g_captureClient = nullptr; }
+    if (g_audioClient) { g_audioClient->Release(); g_audioClient = nullptr; }
+    g_prepared = false;
+
     auto* enumerator = getEnumerator();
     if (!enumerator) return false;
 
@@ -135,7 +146,6 @@ bool startCapture(const std::wstring& deviceId) {
     g_sampleRate = mixFormat->nSamplesPerSec;
     g_channels = mixFormat->nChannels;
 
-    // Initialize in shared mode
     if (FAILED(g_audioClient->Initialize(AUDCLNT_SHAREMODE_SHARED, 0,
                                           10000000, // 1 second buffer
                                           0, mixFormat, nullptr))) {
@@ -157,14 +167,25 @@ bool startCapture(const std::wstring& deviceId) {
 
     device->Release();
 
-    // Clear buffer and start
+    g_preparedDeviceId = deviceId;
+    g_prepared = true;
+    return true;
+}
+
+bool startCapture(const std::wstring& deviceId) {
+    // Re-prepare if device changed or not prepared yet
+    if (!g_prepared || deviceId != g_preparedDeviceId) {
+        if (!prepare(deviceId)) return false;
+    }
+
+    // Clear buffer
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         g_buffer.clear();
     }
 
+    // Start on background thread — IAudioClient::Start() blocks ~500ms in shared mode
     g_capturing = true;
-    g_audioClient->Start();
     g_captureThread = std::thread(captureThreadProc);
 
     return true;
@@ -180,6 +201,7 @@ CaptureResult stopCapture() {
         }
         if (g_audioClient) {
             g_audioClient->Stop();
+            g_audioClient->Reset();
         }
     }
 
@@ -191,9 +213,8 @@ CaptureResult stopCapture() {
         g_buffer.clear();
     }
 
-    // Release audio resources
-    if (g_captureClient) { g_captureClient->Release(); g_captureClient = nullptr; }
-    if (g_audioClient) { g_audioClient->Release(); g_audioClient = nullptr; }
+    // Audio client stays initialized — Reset() makes it reusable
+    // No need to re-prepare; startCapture() can call Start() directly
 
     return result;
 }
