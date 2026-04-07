@@ -54,17 +54,17 @@ cd release && powershell -Command "Compress-Archive -Path 'wisper-agent-universa
 rm -rf release/wisper-agent-nvidia
 mkdir -p release/wisper-agent-nvidia/assets/icons
 cp build/Release/wisper-agent.exe release/wisper-agent-nvidia/
-# CPU fallback
+# CPU fallback exe
 cp bin/Release/whisper-cli.exe release/wisper-agent-nvidia/
-cp bin/Release/whisper.dll release/wisper-agent-nvidia/
-cp bin/Release/ggml.dll release/wisper-agent-nvidia/
-cp bin/Release/ggml-cpu.dll release/wisper-agent-nvidia/
-cp bin/Release/ggml-base.dll release/wisper-agent-nvidia/
-# CUDA (rename to whisper-cli-cuda.exe so app detects it)
-# cuBLAS DLLs (cublas64_12.dll, cublasLt64_12.dll) NOT bundled — loaded from user's NVIDIA driver
+# CUDA exe (rename so app detects it)
 cp bin/cuda/whisper-cli.exe release/wisper-agent-nvidia/whisper-cli-cuda.exe
 cp bin/cuda/ggml-cuda.dll release/wisper-agent-nvidia/
 cp bin/cuda/cudart64_12.dll release/wisper-agent-nvidia/
+# Shared DLLs from CUDA build (includes GPU code paths, falls back to CPU)
+cp bin/cuda/whisper.dll release/wisper-agent-nvidia/
+cp bin/cuda/ggml.dll release/wisper-agent-nvidia/
+cp bin/cuda/ggml-cpu.dll release/wisper-agent-nvidia/
+cp bin/cuda/ggml-base.dll release/wisper-agent-nvidia/
 # Icons
 cp assets/icons/*.ico release/wisper-agent-nvidia/assets/icons/
 cd release && powershell -Command "Compress-Archive -Path 'wisper-agent-nvidia' -DestinationPath 'wisper-agent-nvidia-win64.zip' -Force"

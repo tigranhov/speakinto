@@ -20,14 +20,15 @@ SetupIconFile=assets\icons\icon.ico
 Source: "build\Release\wisper-agent.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; CPU whisper (fallback)
 Source: "bin\Release\whisper-cli.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "bin\Release\whisper.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "bin\Release\ggml.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "bin\Release\ggml-cpu.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "bin\Release\ggml-base.dll"; DestDir: "{app}"; Flags: ignoreversion
 ; CUDA whisper (GPU accelerated — cuBLAS DLLs loaded from user's NVIDIA driver)
 Source: "bin\cuda\whisper-cli.exe"; DestDir: "{app}"; DestName: "whisper-cli-cuda.exe"; Flags: ignoreversion
 Source: "bin\cuda\ggml-cuda.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "bin\cuda\cudart64_12.dll"; DestDir: "{app}"; Flags: ignoreversion
+; Shared DLLs from CUDA build (includes GPU code paths, falls back to CPU)
+Source: "bin\cuda\whisper.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "bin\cuda\ggml.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "bin\cuda\ggml-cpu.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "bin\cuda\ggml-base.dll"; DestDir: "{app}"; Flags: ignoreversion
 ; Icons
 Source: "assets\icons\*.ico"; DestDir: "{app}\assets\icons"; Flags: ignoreversion
 
