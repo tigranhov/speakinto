@@ -313,13 +313,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             tray::setState(tray::State::Idle);
             settings::notifyProcessorDownloadComplete(lParam != 0);
             if (lParam) {
-                tray::showBalloon(L"Wisper Agent", L"AI refinement ready.");
                 if (g_processorEnabled && processor::isReady()) {
                     processor::start();
                     log("AI processor started after download");
                 }
             } else {
-                tray::showBalloon(L"Wisper Agent", L"Failed to download AI model.");
+                log("Failed to download AI model");
             }
             return 0;
 
@@ -332,10 +331,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (success) {
                 g_whisperExeGpu = cuda::getWhisperExePath();
                 g_usingGpu = true;
-                tray::showBalloon(L"Wisper Agent", L"GPU acceleration ready.");
                 log("CUDA setup ready: %ls", g_whisperExeGpu.c_str());
             } else {
-                tray::showBalloon(L"Wisper Agent", L"GPU download failed. Using CPU.");
+                log("GPU download failed, using CPU");
                 g_usingGpu = false;
             }
             return 0;
@@ -347,8 +345,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 g_updateInfo.latestVersion.c_str(),
                 g_updateInfo.changelog.c_str());
             if (g_updateInfo.available && !settings::isDialogOpen()) {
-                std::wstring msg = L"A new version is available!";
-                tray::showBalloon(L"Wisper Agent", msg.c_str());
+                log("Update available: %s", g_updateInfo.latestVersion.c_str());
             }
             return 0;
 
@@ -356,7 +353,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             bool success = lParam != 0;
             settings::notifyUpdateDownloadComplete(success);
             if (success && !g_updateInstallerPath.empty()) {
-                tray::showBalloon(L"Wisper Agent", L"Launching installer...");
                 ShellExecuteW(nullptr, L"open", g_updateInstallerPath.c_str(),
                               nullptr, nullptr, SW_SHOWNORMAL);
                 PostQuitMessage(0);
@@ -365,7 +361,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 int wlen = MultiByteToWideChar(CP_UTF8, 0, g_updateInfo.htmlUrl.c_str(), -1, nullptr, 0);
                 std::vector<wchar_t> wurl(wlen);
                 MultiByteToWideChar(CP_UTF8, 0, g_updateInfo.htmlUrl.c_str(), -1, wurl.data(), wlen);
-                tray::showBalloon(L"Wisper Agent", L"Download failed. Opening release page...");
                 ShellExecuteW(nullptr, L"open", wurl.data(), nullptr, nullptr, SW_SHOWNORMAL);
             }
             return 0;
@@ -386,7 +381,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             bool isStartup = (oldSize == -1);
 
             if (!success) {
-                tray::showBalloon(L"Wisper Agent", L"Model download failed.");
+                log("Model download failed");
                 if (!isStartup) {
                     // Revert to old working model so transcription keeps working
                     g_modelSize = (model::ModelSize)oldSize;
@@ -399,9 +394,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 model::deleteAllExcept(g_modelSize);
                 if (isStartup) {
                     g_state = AppState::Idle;
-                    tray::showBalloon(L"Wisper Agent", L"Ready \u2014 press Ctrl+` to dictate");
-                } else {
-                    tray::showBalloon(L"Wisper Agent", L"New model ready.");
                 }
                 log("Model ready: %s", model::modelSizeName(g_modelSize));
             }
@@ -491,16 +483,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
                     // Handle model change
                     if (cfg.modelSize != g_modelSize) {
-                        if (g_downloading) {
-                            tray::showBalloon(L"Wisper Agent", L"A model download is already in progress.");
-                        } else {
+                        if (!g_downloading) {
                             model::ModelSize oldSize = g_modelSize;
                             g_modelSize = cfg.modelSize;
 
                             if (model::modelExists(g_modelSize)) {
                                 g_modelPath = model::getModelPath(g_modelSize);
                                 model::deleteAllExcept(g_modelSize);
-                                tray::showBalloon(L"Wisper Agent", L"Model switched.");
+                                log("Model switched to %s", model::modelSizeName(g_modelSize));
                             } else {
                                 g_downloading = true;
                                 tray::setState(tray::State::Downloading);
@@ -530,7 +520,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             } else if (id >= tray::IDM_MIC_BASE && id < tray::IDM_MIC_BASE + 100) {
                 g_selectedDeviceIndex = id - tray::IDM_MIC_BASE;
                 log("Selected mic: %ls", g_devices[g_selectedDeviceIndex].name.c_str());
-                tray::showBalloon(L"Microphone", g_devices[g_selectedDeviceIndex].name.c_str());
                 saveCurrentSettings();
             }
             return 0;
@@ -591,7 +580,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
             log("CUDA setup ready: %ls", g_whisperExeGpu.c_str());
         } else {
             log("CUDA setup not found, downloading...");
-            tray::showBalloon(L"Wisper Agent", L"Downloading GPU libraries (~700MB one-time)...");
+            overlay::setState(overlay::State::Downloading, 0);
             std::thread([hwnd = g_hwnd]() {
                 bool ok = cuda::ensureSetup([hwnd](int percent) {
                     PostMessage(hwnd, WM_MODEL_PROGRESS, percent, 0);
@@ -604,7 +593,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     // Check and download model if needed (async to keep UI responsive)
     if (!model::modelExists(g_modelSize)) {
         log("Model %s not found, downloading...", model::modelSizeName(g_modelSize));
-        tray::showBalloon(L"Wisper Agent", L"Downloading speech model...");
         g_downloading = true;
         overlay::setState(overlay::State::Downloading, 0);
         std::thread([size = g_modelSize, hwnd = g_hwnd]() {
@@ -619,7 +607,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
         g_state = AppState::Idle;
         tray::setState(tray::State::Idle);
         overlay::setState(overlay::State::Idle);
-        tray::showBalloon(L"Wisper Agent", L"Ready \u2014 press Ctrl+` to dictate");
     }
 
     // Start processor if enabled and ready
