@@ -326,15 +326,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_CUBLAS_READY: {
             bool success = lParam != 0;
             if (!g_downloading) {
-                // cuBLAS was a standalone download, reset overlay
                 overlay::setState(overlay::State::Idle);
                 tray::setState(tray::State::Idle);
             }
             if (success) {
-                cuda::addCuBlasToPath();
-                log("cuBLAS ready, GPU acceleration enabled");
+                g_whisperExeGpu = cuda::getWhisperExePath();
+                g_usingGpu = true;
+                tray::showBalloon(L"Wisper Agent", L"GPU acceleration ready.");
+                log("CUDA setup ready: %ls", g_whisperExeGpu.c_str());
             } else {
-                tray::showBalloon(L"Wisper Agent", L"GPU libraries download failed. Using CPU.");
+                tray::showBalloon(L"Wisper Agent", L"GPU download failed. Using CPU.");
                 g_usingGpu = false;
             }
             return 0;
@@ -583,16 +584,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     keyboard::start(g_hwnd);
     tray::setState(tray::State::Initializing);
 
-    // If CUDA variant detected, ensure cuBLAS is available for GPU acceleration
+    // If CUDA variant detected, ensure full CUDA setup is available
     if (g_usingGpu) {
-        if (cuda::isCuBlasAvailable()) {
-            cuda::addCuBlasToPath();
-            log("cuBLAS found, GPU acceleration enabled");
+        if (cuda::isReady()) {
+            g_whisperExeGpu = cuda::getWhisperExePath();
+            log("CUDA setup ready: %ls", g_whisperExeGpu.c_str());
         } else {
-            log("cuBLAS not found, downloading for GPU acceleration...");
-            tray::showBalloon(L"Wisper Agent", L"Downloading GPU libraries (~550MB)...");
+            log("CUDA setup not found, downloading...");
+            tray::showBalloon(L"Wisper Agent", L"Downloading GPU libraries (~700MB one-time)...");
             std::thread([hwnd = g_hwnd]() {
-                bool ok = cuda::ensureCuBlas([hwnd](int percent) {
+                bool ok = cuda::ensureSetup([hwnd](int percent) {
                     PostMessage(hwnd, WM_MODEL_PROGRESS, percent, 0);
                 });
                 PostMessage(hwnd, WM_CUBLAS_READY, 0, ok ? 1 : 0);

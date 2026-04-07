@@ -10,13 +10,7 @@
 
 namespace cuda {
 
-// cuBLAS DLLs needed for GPU acceleration
-static const wchar_t* CUBLAS_DLL = L"cublas64_12.dll";
-static const wchar_t* CUBLASLT_DLL = L"cublasLt64_12.dll";
-static constexpr size_t CUBLAS_MIN_SIZE = 50 * 1024 * 1024;     // 50MB minimum
-static constexpr size_t CUBLASLT_MIN_SIZE = 200 * 1024 * 1024;  // 200MB minimum
-
-// Download source: whisper.cpp CUDA release (contains cuBLAS DLLs)
+// whisper.cpp CUDA release — contains whisper-cli.exe, all DLLs including cuBLAS
 static const wchar_t* DOWNLOAD_HOST = L"github.com";
 static const wchar_t* DOWNLOAD_PATH = L"/ggml-org/whisper.cpp/releases/download/v1.8.4/whisper-cublas-12.4.0-bin-x64.zip";
 
@@ -31,28 +25,12 @@ static void log(const char* fmt, ...) {
     fprintf(stderr, "%s\n", buf);
 }
 
-static std::wstring getCuBlasDir() {
+static std::wstring getCudaDir() {
     wchar_t appdata[MAX_PATH];
     if (FAILED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appdata))) {
         return L"";
     }
     return std::wstring(appdata) + L"\\wisper-agent\\cuda";
-}
-
-static std::wstring getAppDir() {
-    wchar_t exePath[MAX_PATH];
-    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    std::wstring dir(exePath);
-    return dir.substr(0, dir.find_last_of(L'\\') + 1);
-}
-
-static bool fileExistsWithMinSize(const std::wstring& path, size_t minSize) {
-    WIN32_FILE_ATTRIBUTE_DATA fileInfo;
-    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fileInfo)) {
-        return false;
-    }
-    ULONGLONG fileSize = ((ULONGLONG)fileInfo.nFileSizeHigh << 32) | fileInfo.nFileSizeLow;
-    return fileSize >= minSize;
 }
 
 static bool ensureDirectory(const std::wstring& dir) {
@@ -65,47 +43,27 @@ static bool ensureDirectory(const std::wstring& dir) {
     return CreateDirectoryW(dir.c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS;
 }
 
-// Check a directory for both cuBLAS DLLs
-static bool hasCuBlasIn(const std::wstring& dir) {
-    return fileExistsWithMinSize(dir + CUBLAS_DLL, CUBLAS_MIN_SIZE) &&
-           fileExistsWithMinSize(dir + CUBLASLT_DLL, CUBLASLT_MIN_SIZE);
+static bool fileExists(const std::wstring& path) {
+    return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
-bool isCuBlasAvailable() {
-    // Check app directory first
-    auto appDir = getAppDir();
-    if (hasCuBlasIn(appDir)) return true;
-
-    // Check %APPDATA% cuda directory
-    auto cublasDir = getCuBlasDir();
-    if (!cublasDir.empty() && hasCuBlasIn(cublasDir + L"\\")) return true;
-
-    return false;
+std::wstring getWhisperExePath() {
+    auto dir = getCudaDir();
+    if (dir.empty()) return L"";
+    return dir + L"\\whisper-cli.exe";
 }
 
-void addCuBlasToPath() {
-    // Determine which directory has cuBLAS
-    std::wstring cublasDir;
-
-    auto appDir = getAppDir();
-    if (hasCuBlasIn(appDir)) {
-        cublasDir = appDir;
-    } else {
-        cublasDir = getCuBlasDir();
-        if (cublasDir.empty() || !hasCuBlasIn(cublasDir + L"\\")) return;
-    }
-
-    // Prepend to PATH
-    DWORD pathLen = GetEnvironmentVariableW(L"PATH", nullptr, 0);
-    std::vector<wchar_t> oldPath(pathLen);
-    GetEnvironmentVariableW(L"PATH", oldPath.data(), pathLen);
-
-    std::wstring newPath = cublasDir + L";" + oldPath.data();
-    SetEnvironmentVariableW(L"PATH", newPath.c_str());
-    log("Added cuBLAS directory to PATH: %ls", cublasDir.c_str());
+bool isReady() {
+    auto dir = getCudaDir();
+    if (dir.empty()) return false;
+    // Check for essential files
+    return fileExists(dir + L"\\whisper-cli.exe") &&
+           fileExists(dir + L"\\whisper.dll") &&
+           fileExists(dir + L"\\ggml-cuda.dll") &&
+           fileExists(dir + L"\\cublas64_12.dll");
 }
 
-// --- HTTP download (same pattern as model_manager/processor_llm) ---
+// --- HTTP download ---
 
 static bool downloadFile(const wchar_t* host, const wchar_t* urlPath,
                           const std::wstring& destPath,
@@ -133,7 +91,6 @@ static bool downloadFile(const wchar_t* host, const wchar_t* urlPath,
         return false;
     }
 
-    // Follow redirects
     DWORD maxRedirects = 10;
     for (DWORD redirect = 0; redirect < maxRedirects; redirect++) {
         if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
@@ -184,7 +141,6 @@ static bool downloadFile(const wchar_t* host, const wchar_t* urlPath,
         break;
     }
 
-    // Get content length
     ULONGLONG contentLength = 0;
     wchar_t clStr[64] = {};
     DWORD clStrSize = sizeof(clStr);
@@ -235,33 +191,32 @@ static bool downloadFile(const wchar_t* host, const wchar_t* urlPath,
     return true;
 }
 
-bool ensureCuBlas(std::function<void(int percent)> onProgress) {
-    if (isCuBlasAvailable()) return true;
+bool ensureSetup(std::function<void(int percent)> onProgress) {
+    if (isReady()) return true;
 
-    auto cublasDir = getCuBlasDir();
-    if (cublasDir.empty()) return false;
-    if (!ensureDirectory(cublasDir)) return false;
+    auto cudaDir = getCudaDir();
+    if (cudaDir.empty()) return false;
+    if (!ensureDirectory(cudaDir)) return false;
 
-    log("Downloading cuBLAS DLLs for GPU acceleration...");
+    log("Downloading CUDA whisper setup for GPU acceleration...");
 
-    // Download the whisper.cpp CUDA release zip
-    auto zipPath = cublasDir + L"\\cublas-download.zip";
+    auto zipPath = cudaDir + L"\\whisper-cuda-download.zip";
     bool ok = downloadFile(DOWNLOAD_HOST, DOWNLOAD_PATH, zipPath, onProgress);
     if (!ok) {
-        log("Failed to download cuBLAS package");
+        log("Failed to download CUDA package");
         return false;
     }
 
-    // Extract only the cuBLAS DLLs using PowerShell
+    // Extract all files using PowerShell
     std::wstring cmd = L"powershell -NoProfile -Command \"";
     cmd += L"Add-Type -AssemblyName System.IO.Compression.FileSystem; ";
     cmd += L"$zip = [System.IO.Compression.ZipFile]::OpenRead('";
     cmd += zipPath;
     cmd += L"'); ";
     cmd += L"foreach ($entry in $zip.Entries) { ";
-    cmd += L"if ($entry.Name -eq 'cublas64_12.dll' -or $entry.Name -eq 'cublasLt64_12.dll') { ";
+    cmd += L"if ($entry.Name -ne '' -and ($entry.Name -like '*.exe' -or $entry.Name -like '*.dll')) { ";
     cmd += L"$dest = Join-Path '";
-    cmd += cublasDir;
+    cmd += cudaDir;
     cmd += L"' $entry.Name; ";
     cmd += L"[System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $dest, $true); ";
     cmd += L"} } $zip.Dispose()\"";
@@ -278,7 +233,7 @@ bool ensureCuBlas(std::function<void(int percent)> onProgress) {
     bool extracted = false;
     if (CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE,
                         CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-        WaitForSingleObject(pi.hProcess, 120000); // 2 min timeout for extraction
+        WaitForSingleObject(pi.hProcess, 300000); // 5 min timeout
         DWORD exitCode = 1;
         GetExitCodeProcess(pi.hProcess, &exitCode);
         CloseHandle(pi.hProcess);
@@ -286,15 +241,14 @@ bool ensureCuBlas(std::function<void(int percent)> onProgress) {
         extracted = (exitCode == 0);
     }
 
-    // Clean up zip
     DeleteFileW(zipPath.c_str());
 
-    if (!extracted || !isCuBlasAvailable()) {
-        log("Failed to extract cuBLAS DLLs");
+    if (!extracted || !isReady()) {
+        log("Failed to extract CUDA setup");
         return false;
     }
 
-    log("cuBLAS DLLs installed successfully");
+    log("CUDA whisper setup installed successfully");
     return true;
 }
 
