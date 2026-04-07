@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <shellapi.h>
 #include <shlobj.h>
 #include <string>
 #include <thread>
@@ -14,6 +15,8 @@
 #include "overlay.h"
 #include "settings.h"
 #include "processor.h"
+#include "updater.h"
+#include "version.h"
 
 // App state
 enum class AppState { Initializing, Idle, Recording, Transcribing };
@@ -35,12 +38,18 @@ static bool g_downloading = false;
 // Processor
 static bool g_processorEnabled = false;
 
+// Update
+static updater::UpdateInfo g_updateInfo;
+static std::wstring g_updateInstallerPath;
+
 // Custom messages for async operations
 constexpr UINT WM_TRANSCRIPTION_DONE = WM_APP + 20;
 constexpr UINT WM_GPU_FALLBACK = WM_APP + 21;
 constexpr UINT WM_MODEL_READY = WM_APP + 22;
 constexpr UINT WM_MODEL_PROGRESS = WM_APP + 23;
 constexpr UINT WM_PROCESSOR_READY = WM_APP + 24;
+constexpr UINT WM_UPDATE_CHECK_DONE = WM_APP + 30;
+constexpr UINT WM_UPDATE_DOWNLOAD_DONE = WM_APP + 31;
 
 // Paths
 static std::wstring g_whisperExeGpu;  // CUDA path, empty if not found
@@ -312,6 +321,36 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             return 0;
 
+        case WM_UPDATE_CHECK_DONE:
+            settings::notifyUpdateCheckComplete(
+                g_updateInfo.available,
+                g_updateInfo.latestVersion.c_str(),
+                g_updateInfo.changelog.c_str());
+            if (g_updateInfo.available && !settings::isDialogOpen()) {
+                std::wstring msg = L"A new version is available!";
+                tray::showBalloon(L"Wisper Agent", msg.c_str());
+            }
+            return 0;
+
+        case WM_UPDATE_DOWNLOAD_DONE: {
+            bool success = lParam != 0;
+            settings::notifyUpdateDownloadComplete(success);
+            if (success && !g_updateInstallerPath.empty()) {
+                tray::showBalloon(L"Wisper Agent", L"Launching installer...");
+                ShellExecuteW(nullptr, L"open", g_updateInstallerPath.c_str(),
+                              nullptr, nullptr, SW_SHOWNORMAL);
+                PostQuitMessage(0);
+            } else if (!success && !g_updateInfo.htmlUrl.empty()) {
+                // Offer to open release page as fallback
+                int wlen = MultiByteToWideChar(CP_UTF8, 0, g_updateInfo.htmlUrl.c_str(), -1, nullptr, 0);
+                std::vector<wchar_t> wurl(wlen);
+                MultiByteToWideChar(CP_UTF8, 0, g_updateInfo.htmlUrl.c_str(), -1, wurl.data(), wlen);
+                tray::showBalloon(L"Wisper Agent", L"Download failed. Opening release page...");
+                ShellExecuteW(nullptr, L"open", wurl.data(), nullptr, nullptr, SW_SHOWNORMAL);
+            }
+            return 0;
+        }
+
         case WM_MODEL_PROGRESS:
             overlay::setState(overlay::State::Downloading, (int)wParam);
             return 0;
@@ -409,7 +448,24 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     processor::removeDependencies();
                 };
 
-                if (settings::showSettingsDialog(g_hInstance, cfg, backendInfo, procCb)) {
+                settings::UpdateCallbacks updateCb;
+                updateCb.requestCheck = [hwndMsg = g_hwnd]() {
+                    std::thread([hwndMsg]() {
+                        g_updateInfo = updater::checkForUpdates();
+                        PostMessage(hwndMsg, WM_UPDATE_CHECK_DONE, 0, 0);
+                    }).detach();
+                };
+                updateCb.requestInstall = [hwndMsg = g_hwnd]() {
+                    std::thread([hwndMsg]() {
+                        auto path = updater::downloadInstaller(g_updateInfo.downloadUrl,
+                            [hwndMsg](int percent) {
+                                PostMessage(hwndMsg, WM_MODEL_PROGRESS, percent, 0);
+                            });
+                        g_updateInstallerPath = path;
+                        PostMessage(hwndMsg, WM_UPDATE_DOWNLOAD_DONE, 0, path.empty() ? 0 : 1);
+                    }).detach();
+                };
+                if (settings::showSettingsDialog(g_hInstance, cfg, backendInfo, procCb, updateCb)) {
                     g_repeatMode = cfg.repeatPressMode;
                     g_selectedDeviceIndex = cfg.selectedMicIndex;
 

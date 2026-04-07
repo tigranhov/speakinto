@@ -16,6 +16,7 @@ add_executable(wisper-agent WIN32
   src/settings.cpp
   src/processor.cpp
   src/processor_llm.cpp
+  src/updater.cpp
 )
 
 target_link_libraries(wisper-agent PRIVATE

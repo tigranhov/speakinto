@@ -22,6 +22,12 @@ struct ProcessorCallbacks {
     std::function<void()> requestRemove;          // delete deps
 };
 
+// Callbacks for update operations (provided by main.cpp)
+struct UpdateCallbacks {
+    std::function<void()> requestCheck;           // trigger async update check
+    std::function<void()> requestInstall;         // download + launch installer
+};
+
 Settings load();
 void save(const Settings& s);
 bool isDialogOpen();
@@ -29,8 +35,15 @@ bool isDialogOpen();
 // Called from main.cpp when async processor download completes
 void notifyProcessorDownloadComplete(bool success);
 
+// Called from main.cpp when async update check completes
+void notifyUpdateCheckComplete(bool available, const char* version, const char* changelog);
+
+// Called from main.cpp when async installer download completes
+void notifyUpdateDownloadComplete(bool success);
+
 bool showSettingsDialog(HINSTANCE hInstance, Settings& s,
                         const wchar_t* backendInfo = L"",
-                        ProcessorCallbacks processorCb = {});
+                        ProcessorCallbacks processorCb = {},
+                        UpdateCallbacks updateCb = {});
 
 }

@@ -1,4 +1,5 @@
 #include "settings.h"
+#include "version.h"
 #include <shlobj.h>
 #include <fstream>
 #include <string>
@@ -150,6 +151,11 @@ static constexpr int ID_RADIO_MEDIUM = 204;
 static constexpr int ID_CHECK_PROCESSOR = 301;
 static constexpr int ID_BTN_PROCESSOR   = 302;
 static constexpr int ID_BTN_SHOW_LOG    = 303;
+// Control IDs — updates
+static constexpr int ID_BTN_CHECK_UPDATE   = 401;
+static constexpr int ID_BTN_INSTALL_UPDATE = 402;
+static constexpr int ID_BTN_VIEW_CHANGELOG = 403;
+static constexpr int ID_STATIC_UPDATE_STATUS = 404;
 // Buttons
 static constexpr int ID_OK           = IDOK;
 static constexpr int ID_CANCEL       = IDCANCEL;
@@ -281,6 +287,79 @@ static ProcessorCallbacks g_processorCb;
 static HWND g_hProcCheck = nullptr;
 static HWND g_hProcBtn = nullptr;
 
+// Update state for dialog
+static UpdateCallbacks g_updateCb;
+static HWND g_hUpdateBtn = nullptr;
+static HWND g_hUpdateStatus = nullptr;
+static HWND g_hInstallBtn = nullptr;
+static HWND g_hChangelogBtn = nullptr;
+static std::string g_updateChangelog;
+static std::string g_updateVersion;
+
+static const wchar_t* CHANGELOG_VIEWER_CLASS = L"WisperChangelogViewerClass";
+static HFONT g_changelogFont = nullptr;
+
+static LRESULT CALLBACK ChangelogViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (msg == WM_DESTROY) {
+        if (g_changelogFont) { DeleteObject(g_changelogFont); g_changelogFont = nullptr; }
+        return 0;
+    }
+    if (msg == WM_CLOSE) { DestroyWindow(hwnd); return 0; }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static void showChangelogViewer(HINSTANCE hInstance, const std::string& version, const std::string& changelog) {
+    std::string display = "Version " + version + " Release Notes\r\n";
+    display += std::string(40, '-') + "\r\n\r\n";
+    // Convert \n to \r\n for Windows edit control
+    for (size_t i = 0; i < changelog.size(); i++) {
+        if (changelog[i] == '\n') {
+            display += "\r\n";
+        } else if (changelog[i] != '\r') {
+            display += changelog[i];
+        }
+    }
+    if (display.empty()) display = "No release notes available.";
+
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, display.c_str(), -1, nullptr, 0);
+    std::vector<wchar_t> wtext(wlen);
+    MultiByteToWideChar(CP_UTF8, 0, display.c_str(), -1, wtext.data(), wlen);
+
+    WNDCLASSEXW cwc = {};
+    cwc.cbSize = sizeof(cwc);
+    cwc.lpfnWndProc = ChangelogViewerWndProc;
+    cwc.hInstance = hInstance;
+    cwc.lpszClassName = CHANGELOG_VIEWER_CLASS;
+    cwc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    cwc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    RegisterClassExW(&cwc);
+
+    HWND hWnd = CreateWindowExW(
+        WS_EX_TOPMOST,
+        CHANGELOG_VIEWER_CLASS,
+        L"What's New",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_SIZEBOX,
+        CW_USEDEFAULT, CW_USEDEFAULT, 550, 400,
+        nullptr, nullptr, hInstance, nullptr
+    );
+    if (!hWnd) return;
+
+    if (g_changelogFont) DeleteObject(g_changelogFont);
+    g_changelogFont = CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
+
+    HWND hEdit = CreateWindowExW(0, L"EDIT", wtext.data(),
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL |
+        ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_AUTOHSCROLL,
+        0, 0, 534, 362,
+        hWnd, nullptr, hInstance, nullptr);
+    SendMessageW(hEdit, WM_SETFONT, (WPARAM)g_changelogFont, TRUE);
+
+    ShowWindow(hWnd, SW_SHOW);
+    SetForegroundWindow(hWnd);
+}
+
 static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_COMMAND: {
@@ -315,6 +394,24 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 DestroyWindow(hwnd);
             } else if (id == ID_BTN_SHOW_LOG) {
                 showLogViewer(g_processorCb.isReady ? (HINSTANCE)GetWindowLongPtrW(hwnd, GWLP_HINSTANCE) : nullptr);
+            } else if (id == ID_BTN_CHECK_UPDATE) {
+                if (g_updateCb.requestCheck) {
+                    g_updateCb.requestCheck();
+                    EnableWindow(g_hUpdateBtn, FALSE);
+                    SetWindowTextW(g_hUpdateStatus, L"Checking...");
+                }
+            } else if (id == ID_BTN_INSTALL_UPDATE) {
+                if (g_updateCb.requestInstall) {
+                    g_updateCb.requestInstall();
+                    EnableWindow(g_hInstallBtn, FALSE);
+                    SetWindowTextW(g_hUpdateStatus, L"Downloading update...");
+                }
+            } else if (id == ID_BTN_VIEW_CHANGELOG) {
+                if (!g_updateChangelog.empty()) {
+                    showChangelogViewer(
+                        (HINSTANCE)GetWindowLongPtrW(hwnd, GWLP_HINSTANCE),
+                        g_updateVersion, g_updateChangelog);
+                }
             } else if (id == ID_BTN_PROCESSOR) {
                 if (g_processorCb.isReady && g_processorCb.isReady()) {
                     // Remove dependencies
@@ -340,6 +437,12 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
 
         case WM_DESTROY:
             g_dlgHwnd = nullptr;
+            g_hProcCheck = nullptr;
+            g_hProcBtn = nullptr;
+            g_hUpdateBtn = nullptr;
+            g_hUpdateStatus = nullptr;
+            g_hInstallBtn = nullptr;
+            g_hChangelogBtn = nullptr;
             g_dlgClosed = true;
             return 0;
     }
@@ -359,9 +462,52 @@ void notifyProcessorDownloadComplete(bool success) {
     }
 }
 
+void notifyUpdateCheckComplete(bool available, const char* version, const char* changelog) {
+    g_updateChangelog = changelog ? changelog : "";
+    g_updateVersion = version ? version : "";
+
+    if (g_hUpdateBtn) EnableWindow(g_hUpdateBtn, TRUE);
+
+    if (g_hUpdateStatus) {
+        if (available && version) {
+            std::string msg = "Version " + std::string(version) + " available!";
+            int wlen = MultiByteToWideChar(CP_UTF8, 0, msg.c_str(), -1, nullptr, 0);
+            std::vector<wchar_t> wmsg(wlen);
+            MultiByteToWideChar(CP_UTF8, 0, msg.c_str(), -1, wmsg.data(), wlen);
+            SetWindowTextW(g_hUpdateStatus, wmsg.data());
+        } else {
+            SetWindowTextW(g_hUpdateStatus, L"You are up to date.");
+        }
+    }
+
+    if (available) {
+        if (g_hInstallBtn) ShowWindow(g_hInstallBtn, SW_SHOW);
+        if (g_hChangelogBtn) ShowWindow(g_hChangelogBtn, SW_SHOW);
+    } else {
+        if (g_hInstallBtn) ShowWindow(g_hInstallBtn, SW_HIDE);
+        if (g_hChangelogBtn) ShowWindow(g_hChangelogBtn, SW_HIDE);
+    }
+}
+
+void notifyUpdateDownloadComplete(bool success) {
+    if (g_hInstallBtn) {
+        EnableWindow(g_hInstallBtn, TRUE);
+        if (success) ShowWindow(g_hInstallBtn, SW_HIDE);
+    }
+    if (g_hUpdateStatus) {
+        SetWindowTextW(g_hUpdateStatus, success
+            ? L"Update downloaded! Installing..."
+            : L"Download failed.");
+    }
+}
+
 bool showSettingsDialog(HINSTANCE hInstance, Settings& s, const wchar_t* backendInfo,
-                        ProcessorCallbacks processorCb) {
+                        ProcessorCallbacks processorCb,
+                        UpdateCallbacks updateCb) {
     g_processorCb = processorCb;
+    g_updateCb = updateCb;
+    g_updateChangelog.clear();
+    g_updateVersion.clear();
     WNDCLASSEXW wc = {};
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = SettingsWndProc;
@@ -374,7 +520,7 @@ bool showSettingsDialog(HINSTANCE hInstance, Settings& s, const wchar_t* backend
     g_dlgSettings = &s;
     g_dlgResult = false;
 
-    int dlgW = 340, dlgH = 500;
+    int dlgW = 340, dlgH = 600;
     int screenW = GetSystemMetrics(SM_CXSCREEN);
     int screenH = GetSystemMetrics(SM_CYSCREEN);
     int x = (screenW - dlgW) / 2;
@@ -511,16 +657,59 @@ bool showSettingsDialog(HINSTANCE hInstance, Settings& s, const wchar_t* backend
         g_dlgHwnd, nullptr, hInstance, nullptr);
     SendMessageW(hInfo, WM_SETFONT, (WPARAM)hFont, TRUE);
 
+    // --- Updates group ---
+    HWND hGroup4 = CreateWindowExW(0, L"BUTTON", L"Updates:",
+        WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+        10, 412, 310, 90,
+        g_dlgHwnd, nullptr, hInstance, nullptr);
+    SendMessageW(hGroup4, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+    // Current version label
+    std::wstring verLabel = L"Current version: " WISPER_AGENT_VERSION_W;
+    HWND hVerLabel = CreateWindowExW(0, L"STATIC", verLabel.c_str(),
+        WS_CHILD | WS_VISIBLE,
+        25, 432, 280, 18,
+        g_dlgHwnd, nullptr, hInstance, nullptr);
+    SendMessageW(hVerLabel, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+    // Check for Updates button
+    g_hUpdateBtn = CreateWindowExW(0, L"BUTTON", L"Check for Updates",
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        25, 456, 130, 26,
+        g_dlgHwnd, (HMENU)(INT_PTR)ID_BTN_CHECK_UPDATE, hInstance, nullptr);
+    SendMessageW(g_hUpdateBtn, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+    // Update status label
+    g_hUpdateStatus = CreateWindowExW(0, L"STATIC", L"",
+        WS_CHILD | WS_VISIBLE | SS_LEFT,
+        160, 460, 155, 18,
+        g_dlgHwnd, (HMENU)(INT_PTR)ID_STATIC_UPDATE_STATUS, hInstance, nullptr);
+    SendMessageW(g_hUpdateStatus, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+    // View Changes button (hidden until update found)
+    g_hChangelogBtn = CreateWindowExW(0, L"BUTTON", L"View Changes",
+        WS_CHILD | BS_PUSHBUTTON,
+        25, 482, 100, 24,
+        g_dlgHwnd, (HMENU)(INT_PTR)ID_BTN_VIEW_CHANGELOG, hInstance, nullptr);
+    SendMessageW(g_hChangelogBtn, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+    // Download & Install button (hidden until update found)
+    g_hInstallBtn = CreateWindowExW(0, L"BUTTON", L"Download && Install",
+        WS_CHILD | BS_PUSHBUTTON,
+        180, 482, 130, 24,
+        g_dlgHwnd, (HMENU)(INT_PTR)ID_BTN_INSTALL_UPDATE, hInstance, nullptr);
+    SendMessageW(g_hInstallBtn, WM_SETFONT, (WPARAM)hFont, TRUE);
+
     // OK / Cancel buttons
     HWND hOk = CreateWindowExW(0, L"BUTTON", L"OK",
         WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-        150, 420, 80, 28,
+        150, 520, 80, 28,
         g_dlgHwnd, (HMENU)(INT_PTR)ID_OK, hInstance, nullptr);
     SendMessageW(hOk, WM_SETFONT, (WPARAM)hFont, TRUE);
 
     HWND hCancelBtn = CreateWindowExW(0, L"BUTTON", L"Cancel",
         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-        240, 420, 80, 28,
+        240, 520, 80, 28,
         g_dlgHwnd, (HMENU)(INT_PTR)ID_CANCEL, hInstance, nullptr);
     SendMessageW(hCancelBtn, WM_SETFONT, (WPARAM)hFont, TRUE);
 
