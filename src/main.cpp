@@ -564,6 +564,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     g_selectedDeviceIndex = cfg.selectedMicIndex;
     g_repeatMode = cfg.repeatPressMode;
     g_modelSize = cfg.modelSize;
+    g_modelPath = model::getModelPath(g_modelSize);
     g_processorEnabled = cfg.processorEnabled;
 
     tray::create(g_hwnd);
