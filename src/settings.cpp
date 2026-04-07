@@ -138,6 +138,12 @@ static bool g_dlgResult = false;
 static bool g_dlgClosed = false;
 static HWND g_dlgHwnd = nullptr;
 
+void closeDialog() {
+    if (g_dlgHwnd) {
+        DestroyWindow(g_dlgHwnd);
+    }
+}
+
 // Control IDs — repeat press mode
 static constexpr int ID_RADIO_FLASH  = 101;
 static constexpr int ID_RADIO_QUEUE  = 102;

@@ -352,6 +352,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             bool success = lParam != 0;
             settings::notifyUpdateDownloadComplete(success);
             if (success && !g_updateInstallerPath.empty()) {
+                settings::closeDialog();
                 ShellExecuteW(nullptr, L"open", g_updateInstallerPath.c_str(),
                               nullptr, nullptr, SW_SHOWNORMAL);
                 PostQuitMessage(0);

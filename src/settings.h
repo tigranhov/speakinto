@@ -31,6 +31,7 @@ struct UpdateCallbacks {
 Settings load();
 void save(const Settings& s);
 bool isDialogOpen();
+void closeDialog();
 
 // Called from main.cpp when async processor download completes
 void notifyProcessorDownloadComplete(bool success);
