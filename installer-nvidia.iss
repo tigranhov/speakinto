@@ -1,6 +1,6 @@
 [Setup]
 AppName=SpeakInto
-AppVersion=0.3.7
+AppVersion=0.4.0
 AppPublisher=tigranhov
 AppPublisherURL=https://github.com/tigranhov/speakinto
 DefaultDirName={autopf}\SpeakInto
