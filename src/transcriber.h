@@ -1,17 +1,25 @@
 #pragma once
 #include <string>
+#include <atomic>
+
+class WhisperEngine;
 
 namespace transcriber {
 
 struct TranscribeResult {
     std::string text;
-    bool processOk; // true if whisper-cli ran successfully (exit code 0)
+    bool ok;
 };
 
-// Transcribe a WAV file using whisper-cli.exe.
-TranscribeResult transcribe(const std::wstring& wavPath, const std::wstring& whisperExe, const std::wstring& modelPath, const std::string& language = "en", bool useVocabPrompt = false);
+// Set the engine used by transcribe(). Must be called before first transcription.
+void setEngine(WhisperEngine* engine);
 
-// Kill the running whisper-cli process (if any)
+// Transcribe 16kHz mono float32 samples using the WhisperEngine.
+TranscribeResult transcribe(const float* samples, int n_samples,
+                            const std::string& language,
+                            const std::string& vocabPrompt);
+
+// Cancel the running transcription (safe to call from any thread).
 void cancelCurrent();
 
 bool isCancelRequested();

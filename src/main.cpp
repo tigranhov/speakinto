@@ -18,6 +18,7 @@
 #include "updater.h"
 #include "version.h"
 #include "cuda_manager.h"
+#include "whisper_engine.h"
 
 // App state
 enum class AppState { Initializing, Idle, Recording, Transcribing };
@@ -49,7 +50,7 @@ static std::wstring g_updateInstallerPath;
 
 // Custom messages for async operations
 constexpr UINT WM_TRANSCRIPTION_DONE = WM_APP + 20;
-constexpr UINT WM_GPU_FALLBACK = WM_APP + 21;
+// WM_APP + 21 was WM_GPU_FALLBACK, now unused
 constexpr UINT WM_MODEL_READY = WM_APP + 22;
 constexpr UINT WM_MODEL_PROGRESS = WM_APP + 23;
 constexpr UINT WM_PROCESSOR_READY = WM_APP + 24;
@@ -57,10 +58,9 @@ constexpr UINT WM_UPDATE_CHECK_DONE = WM_APP + 30;
 constexpr UINT WM_UPDATE_DOWNLOAD_DONE = WM_APP + 31;
 constexpr UINT WM_CUBLAS_READY = WM_APP + 32;
 
-// Paths
-static std::wstring g_whisperExeGpu;  // CUDA path, empty if not found
-static std::wstring g_whisperExeCpu;  // CPU path, always set
-static bool g_usingGpu = false;
+// Whisper engine (direct library link, no subprocess)
+static WhisperEngine g_engine;
+static std::wstring g_appDir;     // directory containing speakinto.exe
 static std::wstring g_modelPath;
 
 static void log(const char* fmt, ...) {
@@ -87,36 +87,61 @@ static bool fileExists(const std::wstring& path) {
     return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
-static void findWhisperPaths() {
+static std::wstring getAppDir() {
     wchar_t exePath[MAX_PATH];
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
     std::wstring dir(exePath);
-    dir = dir.substr(0, dir.find_last_of(L'\\') + 1);
+    return dir.substr(0, dir.find_last_of(L'\\') + 1);
+}
 
-    // CPU binary (always present)
-    g_whisperExeCpu = dir + L"whisper-cli.exe";
-    if (!fileExists(g_whisperExeCpu)) {
-        g_whisperExeCpu = dir + L"..\\..\\bin\\Release\\whisper-cli.exe";
+// Find the CUDA DLL directory: check {appDir}\cuda\ (installer) then %APPDATA%\speakinto\cuda\ (downloaded)
+static std::wstring findCudaDllDir() {
+    // Installer path
+    std::wstring installerCuda = g_appDir + L"cuda";
+    if (fileExists(installerCuda + L"\\whisper.dll")) {
+        return installerCuda;
     }
+    // Dev build path
+    std::wstring devCuda = g_appDir + L"..\\..\\bin\\cuda";
+    if (fileExists(devCuda + L"\\whisper.dll")) {
+        return devCuda;
+    }
+    // Downloaded CUDA path
+    std::wstring downloadedCuda = cuda::getCudaDllDir();
+    if (!downloadedCuda.empty() && fileExists(downloadedCuda + L"\\whisper.dll")) {
+        return downloadedCuda;
+    }
+    return L"";
+}
 
-    // GPU binary (CUDA, optional)
-    std::wstring cudaPath = dir + L"whisper-cli-cuda.exe";
-    if (fileExists(cudaPath)) {
-        g_whisperExeGpu = cudaPath;
+// Find the CPU DLL directory
+static std::wstring findCpuDllDir() {
+    if (fileExists(g_appDir + L"whisper.dll")) {
+        return g_appDir;
+    }
+    std::wstring devDir = g_appDir + L"..\\..\\bin\\Release";
+    if (fileExists(devDir + L"\\whisper.dll")) {
+        return devDir;
+    }
+    return g_appDir; // fallback
+}
+
+static bool initWhisperEngine() {
+    std::wstring cudaDir = findCudaDllDir();
+    std::wstring cpuDir = findCpuDllDir();
+    bool tryGpu = !cudaDir.empty();
+
+    log("CPU DLL dir: %ls", cpuDir.c_str());
+    if (tryGpu) log("CUDA DLL dir: %ls", cudaDir.c_str());
+
+    bool ok = g_engine.init(g_modelPath, tryGpu, cudaDir, cpuDir);
+    if (ok) {
+        log("Whisper engine ready (%s)", g_engine.isUsingGpu() ? "GPU" : "CPU");
+        transcriber::setEngine(&g_engine);
     } else {
-        cudaPath = dir + L"..\\..\\bin\\cuda\\whisper-cli.exe";
-        if (fileExists(cudaPath)) {
-            g_whisperExeGpu = cudaPath;
-        }
+        log("Whisper engine init failed");
     }
-
-    g_usingGpu = !g_whisperExeGpu.empty();
-
-    g_modelPath = model::getModelPath(g_modelSize);
-
-    auto& activeExe = g_usingGpu ? g_whisperExeGpu : g_whisperExeCpu;
-    log("Whisper exe: %ls (%s)", activeExe.c_str(), g_usingGpu ? "CUDA" : "CPU");
-    log("Model path: %ls", g_modelPath.c_str());
+    return ok;
 }
 
 static void saveCurrentSettings() {
@@ -208,37 +233,33 @@ static void onComboUp() {
     tray::setState(tray::State::Transcribing);
     overlay::setState(overlay::State::Transcribing);
 
-    // Run transcription on background thread — capture paths to avoid racing with WM_GPU_FALLBACK
+    // Run transcription on background thread
     HWND hwnd = g_hwnd;
-    auto whisperExe = g_usingGpu ? g_whisperExeGpu : g_whisperExeCpu;
-    auto whisperCpu = g_whisperExeCpu;
-    auto modelPath = g_modelPath;
-    bool usingGpu = g_usingGpu;
     bool vocabPrompt = g_vocabPromptEnabled;
     auto lang = g_language;
-    std::thread([result = std::move(result), hwnd, whisperExe, whisperCpu, modelPath, usingGpu, vocabPrompt, lang]() {
+    std::thread([result = std::move(result), hwnd, vocabPrompt, lang]() {
         transcriber::resetCancelFlag();
 
-        auto wavPath = wav::writeTemp(result.samples, result.sampleRate, result.channels);
-        if (wavPath.empty()) {
-            log("Failed to write WAV file");
+        // Resample to 16kHz mono float32 (no temp file)
+        auto prepared = wav::prepareForWhisper(result.samples, result.sampleRate, result.channels);
+        if (prepared.empty()) {
+            log("Failed to prepare audio");
             PostMessage(hwnd, WM_TRANSCRIPTION_DONE, 0, 0);
             return;
         }
 
-        log("WAV written: %ls", wavPath.c_str());
-
-        auto txResult = transcriber::transcribe(wavPath, whisperExe, modelPath, lang, vocabPrompt);
-        if (!txResult.processOk && usingGpu) {
-            log("GPU transcription failed, retrying with CPU");
-            txResult = transcriber::transcribe(wavPath, whisperCpu, modelPath, lang, vocabPrompt);
-            if (txResult.processOk) {
-                PostMessage(hwnd, WM_GPU_FALLBACK, 0, 0);
-            }
+        std::string prompt;
+        if (vocabPrompt) {
+            prompt = "JavaScript TypeScript Python C++ C# Rust Go Java Kotlin Swift"
+                " React Angular Vue Node.js Django Flask"
+                " API REST GraphQL HTTP HTTPS JSON XML HTML CSS SCSS WebSocket OAuth JWT endpoint middleware webhook"
+                " Docker Kubernetes AWS Azure GCP GitHub GitLab CI/CD pipeline deploy Nginx Redis PostgreSQL MongoDB MySQL"
+                " function variable boolean integer string array object null undefined async await promise callback"
+                " interface enum class struct commit merge branch pull request"
+                " refactor debug compile runtime linter formatter ESLint component module dependency import";
         }
 
-        // Delete temp file
-        DeleteFileW(wavPath.c_str());
+        auto txResult = transcriber::transcribe(prepared.data(), (int)prepared.size(), lang, prompt);
 
         // Check for cancellation before injecting text
         if (txResult.text.empty() || transcriber::isCancelRequested()) {
@@ -310,11 +331,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             onComboUp();
             return 0;
 
-        case WM_GPU_FALLBACK:
-            g_usingGpu = false;
-            log("Switched to CPU backend permanently");
-            return 0;
-
         case WM_PROCESSOR_READY:
             g_downloading = false;
             overlay::setState(overlay::State::Idle);
@@ -336,13 +352,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 overlay::setState(overlay::State::Idle);
                 tray::setState(tray::State::Idle);
             }
-            if (success) {
-                g_whisperExeGpu = cuda::getWhisperExePath();
-                g_usingGpu = true;
-                log("CUDA setup ready: %ls", g_whisperExeGpu.c_str());
-            } else {
+            if (success && !g_engine.isUsingGpu()) {
+                // CUDA DLLs now available — reinit engine to try GPU
+                log("CUDA DLLs downloaded, reinitializing engine with GPU");
+                g_engine.shutdown();
+                initWhisperEngine();
+            } else if (!success) {
                 log("GPU download failed, using CPU");
-                g_usingGpu = false;
             }
             return 0;
         }
@@ -401,6 +417,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             } else if (model::modelExists(g_modelSize)) {
                 g_modelPath = model::getModelPath(g_modelSize);
                 model::deleteAllExcept(g_modelSize);
+                if (g_engine.isLoaded()) {
+                    g_engine.reloadModel(g_modelPath);
+                } else {
+                    initWhisperEngine();
+                }
                 if (isStartup) {
                     g_state = AppState::Idle;
                 }
@@ -448,7 +469,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 cfg.selectedMicIndex = g_selectedDeviceIndex;
                 cfg.modelSize = g_modelSize;
                 cfg.processorEnabled = g_processorEnabled;
-                const wchar_t* backendInfo = g_usingGpu
+                const wchar_t* backendInfo = g_engine.isUsingGpu()
                     ? L"Transcription backend: CUDA (GPU)"
                     : L"Transcription backend: CPU";
                 settings::ProcessorCallbacks procCb;
@@ -499,6 +520,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                             if (model::modelExists(g_modelSize)) {
                                 g_modelPath = model::getModelPath(g_modelSize);
                                 model::deleteAllExcept(g_modelSize);
+                                g_engine.reloadModel(g_modelPath);
                                 log("Model switched to %s", model::modelSizeName(g_modelSize));
                             } else {
                                 g_downloading = true;
@@ -568,7 +590,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     g_hwnd = CreateWindowExW(0, L"SpeakIntoClass", L"SpeakInto",
                               0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, hInstance, nullptr);
 
-    findWhisperPaths();
+    g_appDir = getAppDir();
     refreshDevices();
 
     // Load settings
@@ -588,13 +610,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     keyboard::start(g_hwnd);
     tray::setState(tray::State::Initializing);
 
-    // If CUDA variant detected, ensure full CUDA setup is available
-    if (g_usingGpu) {
-        if (cuda::isReady()) {
-            g_whisperExeGpu = cuda::getWhisperExePath();
-            log("CUDA setup ready: %ls", g_whisperExeGpu.c_str());
-        } else {
-            log("CUDA setup not found, downloading...");
+    // Check if CUDA DLLs need downloading (NVIDIA variant without local CUDA setup)
+    {
+        std::wstring cudaDir = findCudaDllDir();
+        bool hasCudaExe = !cudaDir.empty(); // Has CUDA DLLs already
+        // Check if this is a CUDA-capable build (has ggml-cuda.dll or cuda/ subdir nearby)
+        bool isCudaVariant = hasCudaExe || fileExists(g_appDir + L"ggml-cuda.dll") || fileExists(g_appDir + L"cuda\\ggml-cuda.dll");
+        if (isCudaVariant && !hasCudaExe && !cuda::isReady()) {
+            log("CUDA DLLs not found, downloading...");
             overlay::setState(overlay::State::Downloading, 0);
             std::thread([hwnd = g_hwnd]() {
                 bool ok = cuda::ensureSetup([hwnd](int percent) {
@@ -618,7 +641,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
             PostMessage(hwnd, WM_MODEL_READY, (WPARAM)(-1), ok ? 1 : 0);
         }).detach();
     } else {
-        // Model already present — go straight to ready
+        // Model already present — init engine and go to ready
+        initWhisperEngine();
         g_state = AppState::Idle;
         tray::setState(tray::State::Idle);
         overlay::setState(overlay::State::Idle);
@@ -639,7 +663,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
         DispatchMessage(&msg);
     }
 
-    // Cleanup
+    // Cleanup — cancel any in-flight transcription before freeing the model
+    g_engine.cancel();
+    g_engine.shutdown();
     processor::stop();
     keyboard::stop();
     overlay::destroy();

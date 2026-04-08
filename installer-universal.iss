@@ -17,7 +17,6 @@ SetupIconFile=assets\icons\icon.ico
 
 [Files]
 Source: "build\Release\speakinto.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "bin\Release\whisper-cli.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "bin\Release\whisper.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "bin\Release\ggml.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "bin\Release\ggml-cpu.dll"; DestDir: "{app}"; Flags: ignoreversion

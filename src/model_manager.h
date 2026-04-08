@@ -4,7 +4,7 @@
 
 namespace model {
 
-enum class ModelSize { Tiny, Base, Small, Medium };
+enum class ModelSize { Tiny, Base, Small, Medium, LargeV3Turbo, LargeV3TurboQ5 };
 
 const char* modelSizeName(ModelSize size);
 const char* modelSizeString(ModelSize size);     // for JSON: "tiny", "base", etc.

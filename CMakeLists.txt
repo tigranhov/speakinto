@@ -18,6 +18,7 @@ add_executable(speakinto WIN32
   src/processor_llm.cpp
   src/updater.cpp
   src/cuda_manager.cpp
+  src/whisper_engine.cpp
 )
 
 target_link_libraries(speakinto PRIVATE

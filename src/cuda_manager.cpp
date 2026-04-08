@@ -47,18 +47,15 @@ static bool fileExists(const std::wstring& path) {
     return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
-std::wstring getWhisperExePath() {
-    auto dir = getCudaDir();
-    if (dir.empty()) return L"";
-    return dir + L"\\whisper-cli.exe";
+std::wstring getCudaDllDir() {
+    return getCudaDir();
 }
 
 bool isReady() {
     auto dir = getCudaDir();
     if (dir.empty()) return false;
-    // Check for essential files
-    return fileExists(dir + L"\\whisper-cli.exe") &&
-           fileExists(dir + L"\\whisper.dll") &&
+    // Check for essential DLLs (no whisper-cli.exe needed — we use library mode)
+    return fileExists(dir + L"\\whisper.dll") &&
            fileExists(dir + L"\\ggml-cuda.dll") &&
            fileExists(dir + L"\\cublas64_12.dll");
 }

@@ -40,7 +40,6 @@ Verify the build succeeds with no errors.
 rm -rf release/speakinto-universal
 mkdir -p release/speakinto-universal/assets/icons
 cp build/Release/speakinto.exe release/speakinto-universal/
-cp bin/Release/whisper-cli.exe release/speakinto-universal/
 cp bin/Release/whisper.dll release/speakinto-universal/
 cp bin/Release/ggml.dll release/speakinto-universal/
 cp bin/Release/ggml-cpu.dll release/speakinto-universal/
@@ -52,18 +51,17 @@ cd release && powershell -Command "Compress-Archive -Path 'speakinto-universal' 
 **NVIDIA ZIP (CUDA + CPU fallback):**
 ```
 rm -rf release/speakinto-nvidia
-mkdir -p release/speakinto-nvidia/assets/icons
+mkdir -p release/speakinto-nvidia/assets/icons release/speakinto-nvidia/cuda
 cp build/Release/speakinto.exe release/speakinto-nvidia/
-# CPU fallback exe + shared DLLs (no cuBLAS dependency)
-cp bin/Release/whisper-cli.exe release/speakinto-nvidia/
+# CPU fallback DLLs (no cuBLAS dependency)
 cp bin/Release/whisper.dll release/speakinto-nvidia/
 cp bin/Release/ggml.dll release/speakinto-nvidia/
 cp bin/Release/ggml-cpu.dll release/speakinto-nvidia/
 cp bin/Release/ggml-base.dll release/speakinto-nvidia/
-# CUDA exe (rename so app detects it) + CUDA plugin
-cp bin/cuda/whisper-cli.exe release/speakinto-nvidia/whisper-cli-cuda.exe
-cp bin/cuda/ggml-cuda.dll release/speakinto-nvidia/
-cp bin/cuda/cudart64_12.dll release/speakinto-nvidia/
+# CUDA DLLs (in cuda/ subdirectory)
+cp bin/cuda/whisper.dll release/speakinto-nvidia/cuda/
+cp bin/cuda/ggml-cuda.dll release/speakinto-nvidia/cuda/
+cp bin/cuda/cudart64_12.dll release/speakinto-nvidia/cuda/
 # Icons
 cp assets/icons/*.ico release/speakinto-nvidia/assets/icons/
 cd release && powershell -Command "Compress-Archive -Path 'speakinto-nvidia' -DestinationPath 'speakinto-nvidia-win64.zip' -Force"
@@ -124,6 +122,6 @@ Every release MUST include all four:
 - Never publish a release without building fresh from the current HEAD
 - Always verify build succeeds before packaging
 - `installer-universal.iss` and `installer-nvidia.iss` source files from `build/Release/` and `bin/Release/` — these paths must exist
-- `bin/Release/` contains pre-built whisper.cpp CPU binaries (not built by cmake)
-- `bin/cuda/` contains pre-built whisper.cpp CUDA binaries (not built by cmake)
-- The NVIDIA variant renames `bin/cuda/whisper-cli.exe` to `whisper-cli-cuda.exe` so the app detects it
+- `bin/Release/` contains pre-built whisper.cpp CPU DLLs (not built by cmake)
+- `bin/cuda/` contains pre-built whisper.cpp CUDA DLLs (not built by cmake)
+- The NVIDIA variant places CUDA DLLs in a `cuda/` subdirectory so the app can find them at runtime

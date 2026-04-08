@@ -4,13 +4,13 @@
 
 namespace cuda {
 
-// Get path to CUDA whisper-cli in %APPDATA%/speakinto/cuda/
-std::wstring getWhisperExePath();
+// Get path to CUDA DLL directory (%APPDATA%/speakinto/cuda/)
+std::wstring getCudaDllDir();
 
-// Check if full CUDA setup is ready (whisper-cli + DLLs + cuBLAS)
+// Check if CUDA DLLs are ready (whisper.dll + ggml-cuda.dll + cuBLAS)
 bool isReady();
 
-// Download full CUDA whisper setup to %APPDATA%/speakinto/cuda/.
+// Download CUDA whisper DLLs to %APPDATA%/speakinto/cuda/.
 // Blocking — call from background thread.
 bool ensureSetup(std::function<void(int percent)> onProgress = nullptr);
 

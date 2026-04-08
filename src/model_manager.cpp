@@ -36,6 +36,14 @@ static const ModelInfo MODEL_TABLE[] = {
     { L"ggml-medium.bin",
       L"/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
       1000ULL * 1024 * 1024, "Medium (~1.5GB)", "medium" },
+    // Large V3 Turbo
+    { L"ggml-large-v3-turbo.bin",
+      L"/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
+      1500ULL * 1024 * 1024, "Large V3 Turbo (~1.5GB)", "large-v3-turbo" },
+    // Large V3 Turbo Q5 (quantized)
+    { L"ggml-large-v3-turbo-q5_0.bin",
+      L"/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin",
+      500ULL * 1024 * 1024, "Large V3 Turbo Q5 (~550MB)", "large-v3-turbo-q5" },
 };
 
 static const ModelInfo& getInfo(ModelSize size) {
@@ -49,6 +57,8 @@ ModelSize modelSizeFromString(const std::string& s) {
     if (s == "tiny") return ModelSize::Tiny;
     if (s == "base") return ModelSize::Base;
     if (s == "medium") return ModelSize::Medium;
+    if (s == "large-v3-turbo") return ModelSize::LargeV3Turbo;
+    if (s == "large-v3-turbo-q5") return ModelSize::LargeV3TurboQ5;
     return ModelSize::Small;
 }
 
@@ -106,7 +116,8 @@ void deleteModel(ModelSize size) {
 }
 
 void deleteAllExcept(ModelSize keep) {
-    for (auto s : {ModelSize::Tiny, ModelSize::Base, ModelSize::Small, ModelSize::Medium}) {
+    for (auto s : {ModelSize::Tiny, ModelSize::Base, ModelSize::Small, ModelSize::Medium,
+                    ModelSize::LargeV3Turbo, ModelSize::LargeV3TurboQ5}) {
         if (s != keep) deleteModel(s);
     }
 }
